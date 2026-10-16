@@ -1,13 +1,16 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
 import subprocess
 import tempfile
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from google import genai
 import imageio_ffmpeg
+
+from logic import align_reps_across_runs, vote_aligned_reps
 
 MAX_VIDEO_BYTES = 30 * 1024 * 1024
 MAX_DURATION_SECONDS = 30.0
@@ -75,6 +78,10 @@ class ClipTooLongError(ValueError):
 
 class ModelParseError(RuntimeError):
     """Raised when the model response cannot be parsed as valid JSON."""
+
+    def __init__(self, view: str, message: str = "") -> None:
+        self.view = view
+        super().__init__(message or f"Couldn't read the result for the {view} clip. Try again.")
 
 
 def _probe_duration_seconds(src_path: str, ffmpeg_exe: str) -> float:
@@ -154,6 +161,19 @@ def normalize_clip(raw_bytes: bytes, suffix: str = ".mp4") -> Tuple[bytes, float
                 pass
 
 
+def normalize_both_clips(
+    front_raw: bytes,
+    front_suffix: str,
+    side_raw: bytes,
+    side_suffix: str,
+) -> Tuple[Tuple[bytes, float], Tuple[bytes, float]]:
+    """Normalize front and side clips in parallel."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_front = pool.submit(normalize_clip, front_raw, front_suffix)
+        fut_side = pool.submit(normalize_clip, side_raw, side_suffix)
+        return fut_front.result(), fut_side.result()
+
+
 def strip_json_fences(text: str) -> str:
     """Strip markdown code fences surrounding JSON output."""
     cleaned = text.strip()
@@ -202,10 +222,58 @@ def call_flash_once(
             )
             text = interaction.output_text or ""
             parsed = json.loads(strip_json_fences(text))
-            if not isinstance(parsed, dict) or "reps" not in parsed:
-                raise ValueError("Missing 'reps' key in model JSON.")
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("reps"), list):
+                raise ValueError("Missing 'reps' list in model JSON.")
             return parsed
         except Exception as exc:
             last_error = exc
 
-    raise ModelParseError(f"Couldn't read the result for the {view} clip.") from last_error
+    raise ModelParseError(view) from last_error
+
+
+def screen_both_clips(
+    front_norm_bytes: bytes,
+    side_norm_bytes: bytes,
+    runs_per_clip: int = 5,
+    timeout_seconds: float = 30.0,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Run 5 parallel Flash calls per clip (10 total) and align + vote reps."""
+    front_runs: List[List[Dict[str, Any]]] = [[] for _ in range(runs_per_clip)]
+    side_runs: List[List[Dict[str, Any]]] = [[] for _ in range(runs_per_clip)]
+
+    with ThreadPoolExecutor(max_workers=runs_per_clip * 2) as pool:
+        front_futs = [
+            pool.submit(call_flash_once, front_norm_bytes, "front", timeout_seconds)
+            for _ in range(runs_per_clip)
+        ]
+        side_futs = [
+            pool.submit(call_flash_once, side_norm_bytes, "side", timeout_seconds)
+            for _ in range(runs_per_clip)
+        ]
+
+        for i, fut in enumerate(front_futs):
+            try:
+                res = fut.result()
+                front_runs[i] = res.get("reps", [])
+            except Exception:
+                front_runs[i] = []
+
+        for i, fut in enumerate(side_futs):
+            try:
+                res = fut.result()
+                side_runs[i] = res.get("reps", [])
+            except Exception:
+                side_runs[i] = []
+
+    if not any(front_runs):
+        raise ModelParseError("front")
+    if not any(side_runs):
+        raise ModelParseError("side")
+
+    front_aligned = align_reps_across_runs(front_runs, view="front")
+    side_aligned = align_reps_across_runs(side_runs, view="side")
+
+    return {
+        "front": vote_aligned_reps(front_aligned, view="front", expected_runs=runs_per_clip),
+        "side": vote_aligned_reps(side_aligned, view="side", expected_runs=runs_per_clip),
+    }
