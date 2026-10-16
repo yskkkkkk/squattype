@@ -11,6 +11,7 @@ from pipeline import (
     ClipTooLongError,
     ModelParseError,
     normalize_both_clips,
+    recheck_disputed_reps_progressive,
     screen_both_clips,
 )
 
@@ -28,7 +29,7 @@ st.markdown(
     border-collapse: collapse;
     background-color: #F4F4F2;
     font-size: 0.95rem;
-    margin-bottom: 1rem;
+    margin-bottom: 0.75rem;
 }
 .sq-table th, .sq-table td {
     padding: 0.55rem 0.75rem;
@@ -79,28 +80,54 @@ def format_cell_html(axis: str, cell: Dict[str, Any]) -> str:
     return value_span
 
 
-def render_view_table(reps: List[Dict[str, Any]], view: str) -> None:
-    """Render a rep x axis table for a single view."""
+def build_view_table_html(reps: List[Dict[str, Any]], view: str) -> str:
+    """Build the HTML string for a rep x axis table and any timeout notes."""
     axes = VIEW_AXES[view]
     headers = ["Rep"] + [CONTENT["axes"][ax]["label"] for ax in axes]
     header_html = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
 
     rows_html = []
+    timeout_notes: List[str] = []
     for rep_item in reps:
         rep_num = rep_item["rep"]
         cells = rep_item["cells"]
         tds = [f"<td>{rep_num}</td>"]
+        rep_timed_out = False
         for ax in axes:
             tds.append(f"<td>{format_cell_html(ax, cells[ax])}</td>")
+            if cells[ax].get("timeout_reason"):
+                rep_timed_out = True
+        if rep_timed_out:
+            timeout_notes.append(f"Argon took too long on rep {rep_num}.")
         rows_html.append(f"<tr>{''.join(tds)}</tr>")
 
-    table_html = (
+    notes_html = "".join(
+        f'<div class="sq-unclear">{html.escape(note)}</div>'
+        for note in timeout_notes
+    )
+    return (
         f'<table class="sq-table">'
         f"<thead><tr>{header_html}</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
         f"</table>"
+        f"{notes_html}"
     )
-    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def format_argon_progress_line(
+    total: int,
+    done_labels: List[str],
+    running_labels: List[str],
+) -> str:
+    """Format the live Argon verification line for st.status."""
+    noun = "rep" if total == 1 else "reps"
+    parts = list(done_labels)
+    if running_labels:
+        parts.append(", ".join(f"{lbl} running" for lbl in running_labels))
+    detail = ", ".join(parts)
+    if detail:
+        return f"Verifying {total} {noun} with Gemini 4 Argon… {detail}"
+    return f"Verifying {total} {noun} with Gemini 4 Argon…"
 
 
 st.title(CONTENT["app_name"])
@@ -130,6 +157,9 @@ analyze_clicked = st.button(
     disabled=not both_uploaded,
 )
 
+status_container = st.container()
+results_container = st.container()
+
 if analyze_clicked and both_uploaded:
     front_raw = front_upload.getvalue()
     front_suffix = Path(front_upload.name).suffix or ".mp4"
@@ -137,26 +167,89 @@ if analyze_clicked and both_uploaded:
     side_suffix = Path(side_upload.name).suffix or ".mp4"
 
     try:
-        with st.status(CONTENT["messages"]["preparing"], expanded=True) as status_box:
+        with status_container:
+            status_box = st.status(CONTENT["messages"]["preparing"], expanded=True)
+            prep_line = status_box.empty()
+            flash_line = status_box.empty()
+            argon_line = status_box.empty()
+
+            prep_line.write(CONTENT["messages"]["preparing"])
             t0 = time.monotonic()
             (front_norm, _), (side_norm, _) = normalize_both_clips(
                 front_raw, front_suffix, side_raw, side_suffix
             )
             prep_s = time.monotonic() - t0
-            st.write(f"Preparing your clips… done in {prep_s:.0f} s")
+            prep_line.write(f"Preparing your clips… done in {prep_s:.0f} s")
 
-            t1 = time.monotonic()
             status_box.update(
                 label="Screening both clips with Gemini 3.8 Flash (10 runs)…",
                 state="running",
             )
+            flash_line.write("Screening both clips with Gemini 3.8 Flash (10 runs)…")
+            t1 = time.monotonic()
             screened = screen_both_clips(front_norm, side_norm, runs_per_clip=5)
             flash_s = time.monotonic() - t1
-            st.write(
+            flash_line.write(
                 f"Screening both clips with Gemini 3.8 Flash (10 runs)… done in {flash_s:.0f} s"
             )
-            status_box.update(label="Screening complete", state="complete", expanded=False)
 
+        with results_container:
+            st.subheader("3  Results")
+            tab_front, tab_side = st.tabs(["Front clip", "Side clip"])
+            front_table_slot = tab_front.empty()
+            side_table_slot = tab_side.empty()
+
+            front_table_slot.markdown(
+                build_view_table_html(screened["front"], "front"),
+                unsafe_allow_html=True,
+            )
+            side_table_slot.markdown(
+                build_view_table_html(screened["side"], "side"),
+                unsafe_allow_html=True,
+            )
+
+        disputed_reps = [
+            r for v in ("front", "side") for r in screened[v] if r.get("disputed_axes")
+        ]
+        if disputed_reps:
+            total_disputed = len(disputed_reps)
+            noun = "rep" if total_disputed == 1 else "reps"
+            status_box.update(
+                label=f"Verifying {total_disputed} {noun} with Gemini 4 Argon…",
+                state="running",
+            )
+            argon_line.write(
+                format_argon_progress_line(
+                    total_disputed,
+                    [],
+                    [f"rep {r['rep']}" for r in disputed_reps],
+                )
+            )
+            t2 = time.monotonic()
+            for progress in recheck_disputed_reps_progressive(
+                front_norm, side_norm, screened
+            ):
+                argon_line.write(
+                    format_argon_progress_line(
+                        progress["total"],
+                        progress["done_labels"],
+                        progress["running_labels"],
+                    )
+                )
+                front_table_slot.markdown(
+                    build_view_table_html(screened["front"], "front"),
+                    unsafe_allow_html=True,
+                )
+                side_table_slot.markdown(
+                    build_view_table_html(screened["side"], "side"),
+                    unsafe_allow_html=True,
+                )
+            argon_s = time.monotonic() - t2
+            argon_line.write(
+                f"Verifying {total_disputed} {noun} with Gemini 4 Argon… done in {argon_s:.0f} s"
+            )
+
+        status_box.update(label="Analysis complete", state="complete", expanded=False)
         st.session_state["front_norm"] = front_norm
         st.session_state["side_norm"] = side_norm
         st.session_state["screened"] = screened
@@ -168,14 +261,20 @@ if analyze_clicked and both_uploaded:
         if st.button("Try again"):
             st.rerun()
 
-if "screened" in st.session_state:
+elif "screened" in st.session_state:
     screened_data = st.session_state["screened"]
-    st.subheader("3  Results")
-
-    tab_front, tab_side = st.tabs(["Front clip", "Side clip"])
-    with tab_front:
-        render_view_table(screened_data["front"], "front")
-    with tab_side:
-        render_view_table(screened_data["side"], "side")
+    with results_container:
+        st.subheader("3  Results")
+        tab_front, tab_side = st.tabs(["Front clip", "Side clip"])
+        with tab_front:
+            st.markdown(
+                build_view_table_html(screened_data["front"], "front"),
+                unsafe_allow_html=True,
+            )
+        with tab_side:
+            st.markdown(
+                build_view_table_html(screened_data["side"], "side"),
+                unsafe_allow_html=True,
+            )
 
 st.caption(CONTENT["messages"]["footer"])

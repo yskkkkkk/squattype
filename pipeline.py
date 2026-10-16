@@ -1,19 +1,26 @@
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 import json
 import os
 import re
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from google import genai
 import imageio_ffmpeg
 
-from logic import align_reps_across_runs, vote_aligned_reps
+from logic import (
+    align_reps_across_runs,
+    apply_argon_result,
+    build_recheck_prompt,
+    vote_aligned_reps,
+)
 
 MAX_VIDEO_BYTES = 30 * 1024 * 1024
 MAX_DURATION_SECONDS = 30.0
+ARGON_TIMEOUT_SECONDS = 25.0
 
 PROMPT_FRONT = """너는 맨몸 스쿼트 자세를 판정하는 코치야.
 첨부한 영상은 내가 정면에서 찍은 맨몸 스쿼트 영상이야. 반복은 여러 번 있어.
@@ -184,7 +191,7 @@ def strip_json_fences(text: str) -> str:
 
 
 def get_genai_client(timeout_seconds: float = 30.0) -> genai.Client:
-    """Create a Google GenAI client using GEMINI_API_KEY from environment."""
+    """Create a Google GenAI client with an explicit request timeout in ms."""
     http_options = {"timeout": int(timeout_seconds * 1000)}
     return genai.Client(http_options=http_options)
 
@@ -277,3 +284,138 @@ def screen_both_clips(
         "front": vote_aligned_reps(front_aligned, view="front", expected_runs=runs_per_clip),
         "side": vote_aligned_reps(side_aligned, view="side", expected_runs=runs_per_clip),
     }
+
+
+def call_argon_recheck_once(
+    normalized_bytes: bytes,
+    view: str,
+    bottom: float,
+    disputed_axes: Sequence[str],
+    timeout_seconds: float = ARGON_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    """Verify one disputed rep window using Gemini 4 Argon at 5 fps.
+
+    Worker-safe function: performs no UI calls and returns parsed JSON dict.
+    """
+    prompt = build_recheck_prompt(view, disputed_axes)
+    b64 = base64.b64encode(normalized_bytes).decode("ascii")
+    start_offset = f"{max(0.0, float(bottom) - 1.8):.1f}s"
+    end_offset = f"{float(bottom) + 1.8:.1f}s"
+
+    t_start = time.monotonic()
+    last_error = None
+    for attempt in range(2):
+        remaining = timeout_seconds - (time.monotonic() - t_start)
+        if remaining <= 1.0:
+            break
+        client = get_genai_client(timeout_seconds=remaining)
+        try:
+            interaction = client.interactions.create(
+                model="gemini-4-argon",
+                input=[
+                    {
+                        "type": "video",
+                        "data": b64,
+                        "mime_type": "video/mp4",
+                        "resolution": "high",
+                        "processing": {
+                            "type": "static",
+                            "fps": 5,
+                            "start_offset": start_offset,
+                            "end_offset": end_offset,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+                generation_config={"thinking_level": "low"},
+            )
+            text = interaction.output_text or ""
+            parsed = json.loads(strip_json_fences(text))
+            if not isinstance(parsed, dict):
+                raise ValueError("Argon response is not a JSON object.")
+            return parsed
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0 and (time.monotonic() - t_start) < timeout_seconds - 5.0:
+                continue
+            break
+
+    raise RuntimeError("Argon verification failed or timed out.") from last_error
+
+
+def recheck_disputed_reps_progressive(
+    front_norm_bytes: bytes,
+    side_norm_bytes: bytes,
+    screened: Dict[str, List[Dict[str, Any]]],
+    timeout_seconds: float = ARGON_TIMEOUT_SECONDS,
+) -> Iterator[Dict[str, Any]]:
+    """Run Argon rechecks in parallel with a strict 25s non-blocking wall timeout.
+
+    Yields progress state dicts on the caller (main) thread as each future
+    finishes or when the 25s deadline expires. Never uses a `with` block on
+    ThreadPoolExecutor so slow threads cannot block exit.
+    """
+    tasks: List[Tuple[str, Dict[str, Any], bytes]] = []
+    for view, clip_bytes in (("front", front_norm_bytes), ("side", side_norm_bytes)):
+        for rep_entry in screened.get(view, []):
+            if rep_entry.get("disputed_axes"):
+                tasks.append((view, rep_entry, clip_bytes))
+
+    if not tasks:
+        return
+
+    executor = ThreadPoolExecutor(max_workers=len(tasks))
+    future_to_task = {}
+    for view, rep_entry, clip_bytes in tasks:
+        fut = executor.submit(
+            call_argon_recheck_once,
+            clip_bytes,
+            view,
+            rep_entry["bottom"],
+            rep_entry["disputed_axes"],
+            timeout_seconds,
+        )
+        future_to_task[fut] = (view, rep_entry)
+
+    pending_futs = set(future_to_task.keys())
+    done_labels: List[str] = []
+
+    def _make_progress_payload() -> Dict[str, Any]:
+        running_labels = [
+            f"rep {future_to_task[f][1]['rep']}"
+            for f in future_to_task
+            if f in pending_futs
+        ]
+        return {
+            "total": len(tasks),
+            "completed": len(tasks) - len(pending_futs),
+            "done_labels": list(done_labels),
+            "running_labels": running_labels,
+        }
+
+    try:
+        for fut in as_completed(future_to_task, timeout=timeout_seconds):
+            pending_futs.discard(fut)
+            view, rep_entry = future_to_task[fut]
+            rep_num = rep_entry["rep"]
+            try:
+                raw_json: Optional[Dict[str, Any]] = fut.result(timeout=0)
+            except Exception:
+                raw_json = None
+
+            apply_argon_result(rep_entry, raw_json)
+            done_labels.append(f"rep {rep_num} done")
+            yield _make_progress_payload()
+    except FuturesTimeoutError:
+        pass
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if pending_futs:
+        for fut in list(pending_futs):
+            pending_futs.discard(fut)
+            _, rep_entry = future_to_task[fut]
+            rep_num = rep_entry["rep"]
+            apply_argon_result(rep_entry, None)
+            done_labels.append(f"rep {rep_num} done")
+        yield _make_progress_payload()

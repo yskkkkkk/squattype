@@ -1,15 +1,19 @@
 import json
 from pathlib import Path
+import time
+from unittest.mock import patch
 
 from logic import (
     align_reps_across_runs,
-    build_why_line,
+    apply_argon_result,
+    build_recheck_prompt,
     compute_squat_type,
     majority_vote,
     normalize_korean_value,
     select_recommendations,
     vote_aligned_reps,
 )
+from pipeline import recheck_disputed_reps_progressive
 
 CONTENT_PATH = Path(__file__).parent.parent / "content.json"
 with open(CONTENT_PATH, "r", encoding="utf-8") as f:
@@ -30,6 +34,77 @@ def test_normalize_korean_value_strips_parentheses_and_spaces():
     assert normalize_korean_value("knee", "판단 불가") is None
 
 
+def test_build_recheck_prompt():
+    prompt = build_recheck_prompt("front", ["knee", "tempo"])
+    assert "정면에서 찍은 맨몸 스쿼트 반복이 한 번 있어" in prompt
+    assert "- knee: 정렬" in prompt
+    assert "- pause: 충분" in prompt
+    assert 'JSON만 출력해: {"knee": "...", "pause": "..."}' in prompt
+
+
+def test_apply_argon_result_success_and_timeout():
+    aligned = [
+        {
+            "rep": 2,
+            "bottom": 8.8,
+            "votes": {
+                "upper": ["S", "S", "S", "S", "S"],
+                "knee": ["V", "V", "V", "A", "A"],
+                "tempo": ["B", "B", "B", "B", "B"],
+            },
+        }
+    ]
+    voted = vote_aligned_reps(aligned, view="front", expected_runs=5)
+    apply_argon_result(voted[0], {"knee": "안쪽(두 무릎 사이 간격이 좁아지거나)"})
+    assert voted[0]["cells"]["knee"]["value"] == "V"
+    assert voted[0]["cells"]["knee"]["status"] == "verified"
+    assert voted[0]["cells"]["knee"]["timeout_reason"] is None
+
+    # Timeout fallback uses majority_value and sets status='check'
+    voted_timeout = vote_aligned_reps(aligned, view="front", expected_runs=5)
+    apply_argon_result(voted_timeout[0], None)
+    assert voted_timeout[0]["cells"]["knee"]["value"] == "V"
+    assert voted_timeout[0]["cells"]["knee"]["status"] == "check"
+    assert voted_timeout[0]["cells"]["knee"]["timeout_reason"] == "Argon took too long on rep 2."
+
+
+def test_recheck_timeout_does_not_wait_for_slow_thread():
+    aligned = [
+        {
+            "rep": 3,
+            "bottom": 12.0,
+            "votes": {
+                "upper": ["S", "S", "S", "S", "S"],
+                "depth": ["D", "H", "H", "D", "H"],
+                "tempo": ["C", "C", "C", "C", "C"],
+            },
+        }
+    ]
+    screened = {
+        "front": [],
+        "side": vote_aligned_reps(aligned, view="side", expected_runs=5),
+    }
+
+    def slow_argon(*args, **kwargs):
+        time.sleep(5.0)
+        return {"depth": "깊음"}
+
+    t0 = time.monotonic()
+    with patch("pipeline.call_argon_recheck_once", side_effect=slow_argon):
+        events = list(
+            recheck_disputed_reps_progressive(
+                b"front", b"side", screened, timeout_seconds=0.2
+            )
+        )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0
+    assert len(events) == 1
+    cell = screened["side"][0]["cells"]["depth"]
+    assert cell["status"] == "check"
+    assert cell["value"] == "H"
+    assert cell["timeout_reason"] == "Argon took too long on rep 3."
+
+
 def test_align_reps_across_runs_mode_and_threshold():
     run1 = [
         {"rep": 1, "bottom": 2.5, "upper": "곧음", "knee": "정렬", "pause": "충분"},
@@ -39,7 +114,6 @@ def test_align_reps_across_runs_mode_and_threshold():
         {"rep": 1, "bottom": 2.6, "upper": "곧음", "knee": "정렬", "pause": "충분"},
         {"rep": 2, "bottom": 9.1, "upper": "곧음", "knee": "안쪽", "pause": "짧음"},
     ]
-    # Run 3 has an extra spurious rep and rep 2 shifted by > 0.7s
     run3 = [
         {"rep": 1, "bottom": 2.4, "upper": "곧음", "knee": "정렬", "pause": "충분"},
         {"rep": 2, "bottom": 5.5, "upper": "곧음", "knee": "정렬", "pause": "충분"},
@@ -50,7 +124,6 @@ def test_align_reps_across_runs_mode_and_threshold():
     assert len(aligned) == 2
     assert aligned[0]["bottom"] == 2.5
     assert aligned[0]["votes"]["upper"] == ["S", "S", "S"]
-    # Rep 2 in run3 is at 10.0s, which is 1.1s away from 8.9s (> 0.7s) -> None
     assert aligned[1]["bottom"] == 8.9
     assert aligned[1]["votes"]["knee"] == [None, "V", "V"]
 
@@ -83,7 +156,6 @@ def test_vote_aligned_reps_confirmed_vs_disputed():
     assert cells["knee"]["disputed"] is True
     assert cells["knee"]["value"] == "V"
 
-    # Missing vote triggers verification even if 4 votes agree
     assert cells["tempo"]["status"] == "verifying"
     assert cells["tempo"]["disputed"] is True
     assert cells["tempo"]["value"] == "C"
@@ -110,7 +182,6 @@ def test_compute_squat_type():
     ]
     assert compute_squat_type(front_sadc, side_sadc) == "SADC"
 
-    # 3 out of 5 problem reps (> 50%) triggers problem letter
     front_rvdb = [
         _make_voted_rep(1, {"upper": "R", "knee": "V", "tempo": "C"}),
         _make_voted_rep(2, {"upper": "R", "knee": "V", "tempo": "C"}),
@@ -129,13 +200,10 @@ def test_compute_squat_type():
 
 
 def test_select_recommendations_rules():
-    # Pain = Yes -> pain message, no exercises
     res_pain = select_recommendations("RVDB", "Yes", "Regular", CONTENT)
     assert res_pain["pain_message"] == CONTENT["messages"]["pain"]
     assert res_pain["items"] == []
 
-    # Regular + 3 problem letters (RVDB has R, V, B = 3) -> downgraded to Sometimes
-    # Priority V, R, H, B -> picks V and R
     front_reps = [
         _make_voted_rep(2, {"upper": "R", "knee": "V", "tempo": "B"}),
         _make_voted_rep(4, {"upper": "S", "knee": "V", "tempo": "C"}),
@@ -148,7 +216,6 @@ def test_select_recommendations_rules():
     assert res_rvdb["items"][0]["name"] == "Band squat"
     assert res_rvdb["items"][0]["why"] == "Why: knees caved in on reps 2 and 4."
 
-    # All clear (SADC)
     res_clear = select_recommendations("SADC", "No", "Regular", CONTENT)
     assert res_clear["level"] == "Regular"
     assert len(res_clear["items"]) == 1

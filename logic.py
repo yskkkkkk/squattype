@@ -37,11 +37,35 @@ KOREAN_TO_CODE: Dict[str, Dict[str, Optional[str]]] = {
     },
 }
 
+RECHECK_AXIS_LINES: Dict[str, str] = {
+    "upper": "- upper: 곧음(시선이 정면 또는 2~3m 앞 바닥, 가슴이 펴짐) / 말림(고개를 숙여 발 바로 앞을 보거나 등 위쪽이 둥글게 말림)",
+    "knee": "- knee: 정렬(무릎이 두 번째 발가락 방향이거나 그보다 바깥) / 안쪽(두 무릎 사이 간격이 좁아지거나 무릎이 엄지발가락 쪽이나 그 안쪽으로 모임)",
+    "depth": "- depth: 깊음(고관절이 무릎 윗부분과 같은 높이이거나 더 낮음) / 얕음(고관절이 무릎보다 확실히 높음)",
+    "tempo": "- pause: 충분(가장 낮은 지점에서 1초 이상 멈춤) / 짧음(멈췄지만 1초 미만) / 없음(바로 올라옴)",
+}
+
+
+def build_recheck_prompt(view: str, disputed_axes: Sequence[str]) -> str:
+    """Build the verbatim Korean RECHECK prompt for the disputed axes of one rep."""
+    view_kr = "정면" if view == "front" else "측면"
+    axis_lines = "\n".join(RECHECK_AXIS_LINES[ax] for ax in disputed_axes)
+    json_keys = [
+        ("pause" if ax == "tempo" else ax)
+        for ax in disputed_axes
+    ]
+    json_example = "{" + ", ".join(f'"{k}": "..."' for k in json_keys) + "}"
+    return (
+        f"첨부한 영상 구간에는 {view_kr}에서 찍은 맨몸 스쿼트 반복이 한 번 있어. 가장 낮은 지점을 기준으로 판정해.\n"
+        f"{axis_lines}\n"
+        f"바르게 한 반복은 바르다고 판정해. 문제를 억지로 찾지 마.\n"
+        f"JSON만 출력해: {json_example}"
+    )
+
 
 def normalize_korean_value(axis: str, raw_value: Optional[str]) -> Optional[str]:
     """Convert a Korean model judgment string into a single-letter code.
 
-    Reads only the text before any '(' and strips spaces.
+    Reads only the text before any '(' and strip spaces.
     Returns None for '판단 불가' or unrecognized values.
     """
     if not raw_value or not isinstance(raw_value, str):
@@ -51,7 +75,6 @@ def normalize_korean_value(axis: str, raw_value: Optional[str]) -> Optional[str]
     axis_map = KOREAN_TO_CODE.get(canonical_axis, {})
     if head in axis_map:
         return axis_map[head]
-    # Also accept already-normalized codes if present
     valid_codes = AXIS_CODES.get(canonical_axis, {})
     if head in (valid_codes.get("good"), valid_codes.get("problem")):
         return head
@@ -122,7 +145,6 @@ def align_reps_across_runs(
                 for axis in VIEW_AXES[view]:
                     votes_by_axis[axis].append(None)
 
-        # Ensure exact length equal to num_total_runs
         for axis in VIEW_AXES[view]:
             while len(votes_by_axis[axis]) < num_total_runs:
                 votes_by_axis[axis].append(None)
@@ -187,6 +209,7 @@ def vote_aligned_reps(
                     "disputed": False,
                     "votes": votes,
                     "user_checked": None,
+                    "timeout_reason": None,
                 }
             else:
                 disputed_axes.append(axis)
@@ -197,6 +220,7 @@ def vote_aligned_reps(
                     "disputed": True,
                     "votes": votes,
                     "user_checked": None,
+                    "timeout_reason": None,
                 }
 
         results.append(
@@ -209,6 +233,40 @@ def vote_aligned_reps(
         )
 
     return results
+
+
+def apply_argon_result(
+    rep_entry: Dict[str, Any],
+    raw_argon_json: Optional[Dict[str, Any]],
+) -> None:
+    """Update a disputed rep's cells in place from Argon's parsed JSON response.
+
+    If raw_argon_json is None or an axis is missing/unparseable, falls back
+    to majority_value with status 'check' and sets timeout_reason.
+    """
+    rep_num = rep_entry["rep"]
+    disputed_axes: List[str] = rep_entry.get("disputed_axes", [])
+    cells = rep_entry["cells"]
+
+    for axis in disputed_axes:
+        cell = cells[axis]
+        code: Optional[str] = None
+        if isinstance(raw_argon_json, dict):
+            raw_val = (
+                raw_argon_json.get("pause", raw_argon_json.get("tempo"))
+                if axis == "tempo"
+                else raw_argon_json.get(axis)
+            )
+            code = normalize_korean_value(axis, raw_val)
+
+        if code is not None:
+            cell["value"] = code
+            cell["status"] = "verified"
+            cell["timeout_reason"] = None
+        else:
+            cell["value"] = cell["majority_value"]
+            cell["status"] = "check"
+            cell["timeout_reason"] = f"Argon took too long on rep {rep_num}."
 
 
 def compute_view_axis_letter(reps: Sequence[Dict[str, Any]], axis: str) -> str:
@@ -234,22 +292,14 @@ def compute_squat_type(
     """Compute the 4-letter squat type (upper-knee-depth-tempo)."""
     upper_front = compute_view_axis_letter(front_reps, "upper")
     upper_side = compute_view_axis_letter(side_reps, "upper")
-    upper = (
-        "R"
-        if ("R" in (upper_front, upper_side))
-        else "S"
-    )
+    upper = "R" if ("R" in (upper_front, upper_side)) else "S"
 
     knee = compute_view_axis_letter(front_reps, "knee")
     depth = compute_view_axis_letter(side_reps, "depth")
 
     tempo_front = compute_view_axis_letter(front_reps, "tempo")
     tempo_side = compute_view_axis_letter(side_reps, "tempo")
-    tempo = (
-        "B"
-        if ("B" in (tempo_front, tempo_side))
-        else "C"
-    )
+    tempo = "B" if ("B" in (tempo_front, tempo_side)) else "C"
 
     return f"{upper}{knee}{depth}{tempo}"
 
@@ -321,7 +371,7 @@ def select_recommendations(
         }
 
     recs_cfg = content["recommendations"]
-    priority: List[str] = recs_cfg["priority"]  # ["V", "R", "H", "B"]
+    priority: List[str] = recs_cfg["priority"]
     problem_letters = [p for p in priority if p in squat_type]
 
     level = experience if experience in ("Beginner", "Sometimes", "Regular") else "Beginner"
