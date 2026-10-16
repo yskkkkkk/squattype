@@ -1,0 +1,9 @@
+# secrets and private media
+.env
+*.key
+key.txt
+*.mp4
+*.mov
+test_videos/
+__pycache__/
+.streamlit/secrets.toml
