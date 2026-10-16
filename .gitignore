@@ -7,3 +7,4 @@ key.txt
 test_videos/
 __pycache__/
 .streamlit/secrets.toml
+*.zip
