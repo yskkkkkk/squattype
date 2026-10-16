@@ -34,6 +34,8 @@ flowchart TD
 | Clean squats | 30 / 30 correct | 0 | 0 | 0 | `SADC` — The Textbook |
 | Original "before" squats | not scored per rep | 0 | 0 | 2 | `RVDB` — The Roller Coaster |
 
+The mixed clips plant each fault on a single rep, so per-rep scoring catches all of them (19 of 19) while the overall type stays SADB, because a type letter only changes when most reps share the problem.
+
 A small test set from one person; treat the numbers as a sanity check, not a benchmark. Test clips show a real face and are not included in this repo.
 
 ## Design notes from pre-event experiments

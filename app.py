@@ -22,7 +22,7 @@ from pipeline import (
     ModelParseError,
     compare_front_sessions,
     normalize_both_clips,
-    normalize_video_bytes,
+    normalize_clip,
     recheck_disputed_reps_progressive,
     screen_both_clips,
 )
@@ -582,7 +582,7 @@ if compare_clicked and can_compare:
     prev_suffix = Path(prev_front_upload.name).suffix or ".mp4"
     try:
         with st.spinner("Comparing sessions with Gemini 4 Argon…"):
-            prev_norm, _ = normalize_video_bytes(prev_raw, input_suffix=prev_suffix)
+            prev_norm, _ = normalize_clip(prev_raw, suffix=prev_suffix)
             comparison_text = compare_front_sessions(
                 prev_norm, st.session_state["front_norm"]
             )
