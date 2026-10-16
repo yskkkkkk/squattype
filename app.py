@@ -2,25 +2,27 @@ import html
 import json
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import streamlit as st
 
 from logic import (
     AXIS_CODES,
     VIEW_AXES,
+    apply_group_scene_check,
     apply_user_scene_check,
-    compute_scene_seek_seconds,
+    build_scene_check_items,
     compute_squat_type,
     count_pending_checks,
     format_provisional_line,
-    is_cell_flagged,
     select_recommendations,
 )
 from pipeline import (
     ClipTooLongError,
     ModelParseError,
+    compare_front_sessions,
     normalize_both_clips,
+    normalize_video_bytes,
     recheck_disputed_reps_progressive,
     screen_both_clips,
 )
@@ -137,13 +139,13 @@ def build_view_table_html(reps: List[Dict[str, Any]], view: str) -> str:
         rep_num = rep_item["rep"]
         cells = rep_item["cells"]
         tds = [f"<td>{rep_num}</td>"]
-        rep_timed_out = False
+        rep_timeout_reason = None
         for ax in axes:
             tds.append(f"<td>{format_cell_html(ax, cells[ax])}</td>")
             if cells[ax].get("timeout_reason") and cells[ax].get("status") == "check":
-                rep_timed_out = True
-        if rep_timed_out:
-            timeout_notes.append(f"Argon took too long on rep {rep_num}.")
+                rep_timeout_reason = cells[ax]["timeout_reason"]
+        if rep_timeout_reason:
+            timeout_notes.append(rep_timeout_reason)
         rows_html.append(f"<tr>{''.join(tds)}</tr>")
 
     notes_html = "".join(
@@ -212,81 +214,48 @@ def render_type_card_into_slot(
     return squat_type
 
 
-def render_scene_check_buttons(
+def render_scene_checks_with_inline_player(
     reps: List[Dict[str, Any]],
     view: str,
+    clip_bytes: bytes,
 ) -> None:
-    """Render a 'Check this scene' button for every flagged cell in a view."""
-    axes = VIEW_AXES[view]
-    for rep_entry in reps:
-        rep_num = rep_entry["rep"]
-        cells = rep_entry["cells"]
-        for ax in axes:
-            cell = cells[ax]
-            if not is_cell_flagged(cell, ax):
-                continue
-            axis_label = CONTENT["axes"][ax]["label"]
-            word = get_value_word(ax, cell["value"])
-            checked_state = cell.get("user_checked")
-            checked_note = ""
-            if checked_state == "looks_right":
-                checked_note = f" · {CONTENT['status']['looks_right']}"
-            elif checked_state == "not_quite":
-                checked_note = f" · {CONTENT['status']['not_quite']}"
+    """Render grouped problem rows and individual unclear rows with inline scene player."""
+    items = build_scene_check_items(reps, view)
+    view_title = "Front clip" if view == "front" else "Side clip"
+    active_scene_id = st.session_state.get("active_scene_id")
 
-            col_lbl, col_btn = st.columns([2, 1])
-            with col_lbl:
-                st.markdown(
-                    f'<div class="sq-unclear" style="padding-top:0.4rem;">'
-                    f"Rep {rep_num} · {html.escape(axis_label)} — {html.escape(word)}{html.escape(checked_note)}"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-            with col_btn:
-                if st.button(
-                    CONTENT["status"]["check_button"],
-                    key=f"check_btn_{view}_{rep_num}_{ax}",
-                    use_container_width=True,
-                ):
-                    st.session_state["active_scene"] = {
-                        "view": view,
-                        "rep": rep_num,
-                        "axis": ax,
-                    }
-                    st.session_state["active_scene_seek"] = compute_scene_seek_seconds(
-                        rep_entry["bottom"]
-                    )
-                    st.rerun()
+    for item in items:
+        item_id = item["id"]
+        checked_state = item.get("user_checked")
+        checked_note = ""
+        if checked_state == "looks_right":
+            checked_note = f" · {CONTENT['status']['looks_right']}"
+        elif checked_state == "not_quite":
+            checked_note = f" · {CONTENT['status']['not_quite']}"
 
-
-def render_active_scene_player_and_recommendations(
-    screened: Dict[str, List[Dict[str, Any]]],
-    front_norm: bytes,
-    side_norm: bytes,
-    survey_answers: Dict[str, str],
-    squat_type: str,
-) -> None:
-    """Render the scene confirmation video player (if active) and recommendation cards."""
-    active_scene: Optional[Dict[str, Any]] = st.session_state.get("active_scene")
-    if active_scene:
-        s_view = active_scene["view"]
-        s_rep = active_scene["rep"]
-        s_axis = active_scene["axis"]
-        matching_rep = next(
-            (r for r in screened.get(s_view, []) if r["rep"] == s_rep),
-            None,
-        )
-        if matching_rep is not None:
-            seek_s = compute_scene_seek_seconds(matching_rep["bottom"])
-            st.session_state["active_scene_seek"] = seek_s
-            clip_bytes = front_norm if s_view == "front" else side_norm
-            axis_label = CONTENT["axes"][s_axis]["label"]
-            word = get_value_word(s_axis, matching_rep["cells"][s_axis]["value"])
-
-            st.caption(
-                f"{s_view.capitalize()} clip · Rep {s_rep} · {axis_label} ({word}) — {seek_s} s"
+        col_lbl, col_btn = st.columns([2, 1])
+        with col_lbl:
+            st.markdown(
+                f'<div class="sq-unclear" style="padding-top:0.4rem;">'
+                f"{html.escape(item['label'])}{html.escape(checked_note)}"
+                f"</div>",
+                unsafe_allow_html=True,
             )
-            st.video(clip_bytes, start_time=seek_s)
+        with col_btn:
+            if st.button(
+                CONTENT["status"]["check_button"],
+                key=f"check_btn_{item_id}",
+                use_container_width=True,
+            ):
+                st.session_state["active_scene_id"] = item_id
+                st.session_state["active_scene_seek"] = item["seek_seconds"]
+                st.rerun()
+
+        if active_scene_id == item_id:
+            rep_num = item["representative_rep"]
+            seek_s = item["seek_seconds"]
+            st.caption(f"{view_title} · rep {rep_num} · from {seek_s} s")
+            st.video(clip_bytes, start_time=seek_s, autoplay=True, muted=True)
 
             col_q, col_yes, col_no = st.columns([2, 1, 1])
             with col_q:
@@ -294,20 +263,47 @@ def render_active_scene_player_and_recommendations(
             with col_yes:
                 if st.button(
                     CONTENT["status"]["looks_right"],
-                    key=f"scene_looks_right_{s_view}_{s_rep}_{s_axis}",
+                    key=f"scene_looks_right_{item_id}",
                     use_container_width=True,
                 ):
-                    apply_user_scene_check(matching_rep, s_axis, "looks_right")
+                    if item["kind"] == "group":
+                        apply_group_scene_check(reps, item["axis"], "looks_right")
+                    else:
+                        matching_rep = next(
+                            (r for r in reps if r["rep"] == rep_num), None
+                        )
+                        if matching_rep is not None:
+                            apply_user_scene_check(
+                                matching_rep, item["axis"], "looks_right"
+                            )
+                    st.session_state.pop("active_scene_id", None)
                     st.rerun()
             with col_no:
                 if st.button(
                     CONTENT["status"]["not_quite"],
-                    key=f"scene_not_quite_{s_view}_{s_rep}_{s_axis}",
+                    key=f"scene_not_quite_{item_id}",
                     use_container_width=True,
                 ):
-                    apply_user_scene_check(matching_rep, s_axis, "not_quite")
+                    if item["kind"] == "group":
+                        apply_group_scene_check(reps, item["axis"], "not_quite")
+                    else:
+                        matching_rep = next(
+                            (r for r in reps if r["rep"] == rep_num), None
+                        )
+                        if matching_rep is not None:
+                            apply_user_scene_check(
+                                matching_rep, item["axis"], "not_quite"
+                            )
+                    st.session_state.pop("active_scene_id", None)
                     st.rerun()
 
+
+def render_recommendations(
+    screened: Dict[str, List[Dict[str, Any]]],
+    survey_answers: Dict[str, str],
+    squat_type: str,
+) -> None:
+    """Render the 'Try this next' exercise recommendation section."""
     recs = select_recommendations(
         squat_type=squat_type,
         pain=survey_answers.get("pain", "No"),
@@ -383,19 +379,27 @@ status_container = st.container()
 results_container = st.container()
 
 if analyze_clicked and both_uploaded:
-    st.session_state.pop("active_scene", None)
+    st.session_state.pop("active_scene_id", None)
     st.session_state.pop("active_scene_seek", None)
+    st.session_state.pop("compare_result", None)
     front_raw = front_upload.getvalue()
     front_suffix = Path(front_upload.name).suffix or ".mp4"
     side_raw = side_upload.getvalue()
     side_suffix = Path(side_upload.name).suffix or ".mp4"
+    tips_list: List[str] = CONTENT.get("tips", [])
 
     try:
+        t_total_start = time.monotonic()
+        status_lines: List[str] = []
         with status_container:
             status_box = st.status(CONTENT["messages"]["preparing"], expanded=True)
             prep_line = status_box.empty()
             flash_line = status_box.empty()
             argon_line = status_box.empty()
+            tip_slot = st.empty()
+
+            if tips_list:
+                tip_slot.caption(f"Tip: {tips_list[0]}")
 
             prep_line.write(CONTENT["messages"]["preparing"])
             t0 = time.monotonic()
@@ -403,7 +407,12 @@ if analyze_clicked and both_uploaded:
                 front_raw, front_suffix, side_raw, side_suffix
             )
             prep_s = time.monotonic() - t0
-            prep_line.write(f"Preparing your clips… done in {prep_s:.0f} s")
+            prep_done_msg = f"Preparing your clips… done in {prep_s:.0f} s"
+            prep_line.write(prep_done_msg)
+            status_lines.append(prep_done_msg)
+
+            if len(tips_list) > 1:
+                tip_slot.caption(f"Tip: {tips_list[1]}")
 
             status_box.update(
                 label="Screening both clips with Gemini 3.8 Flash (10 runs)…",
@@ -413,9 +422,9 @@ if analyze_clicked and both_uploaded:
             t1 = time.monotonic()
             screened = screen_both_clips(front_norm, side_norm, runs_per_clip=5)
             flash_s = time.monotonic() - t1
-            flash_line.write(
-                f"Screening both clips with Gemini 3.8 Flash (10 runs)… done in {flash_s:.0f} s"
-            )
+            flash_done_msg = f"Screening done in {flash_s:.0f} s"
+            flash_line.write(flash_done_msg)
+            status_lines.append(flash_done_msg)
 
         with results_container:
             st.subheader("3  Results")
@@ -454,10 +463,17 @@ if analyze_clicked and both_uploaded:
                     [f"{v} rep {r['rep']}" for v, r in disputed_reps],
                 )
             )
+            if len(tips_list) > 2:
+                tip_slot.caption(f"Tip: {tips_list[2]}")
+
             t2 = time.monotonic()
+            tip_idx = 2
             for progress in recheck_disputed_reps_progressive(
                 front_norm, side_norm, screened
             ):
+                if tips_list:
+                    tip_idx = (tip_idx + 1) % len(tips_list)
+                    tip_slot.caption(f"Tip: {tips_list[tip_idx]}")
                 argon_line.write(
                     format_argon_progress_line(
                         progress["total"],
@@ -475,26 +491,37 @@ if analyze_clicked and both_uploaded:
                     unsafe_allow_html=True,
                 )
             argon_s = time.monotonic() - t2
-            argon_line.write(
-                f"Verifying {total_disputed} {noun} with Gemini 4 Argon… done in {argon_s:.0f} s"
+            argon_done_msg = (
+                f"Verified {total_disputed} {noun} with Gemini 4 Argon in {argon_s:.0f} s"
             )
+            argon_line.write(argon_done_msg)
+            status_lines.append(argon_done_msg)
 
-        status_box.update(label="Analysis complete", state="complete", expanded=False)
+        tip_slot.empty()
+        total_s = time.monotonic() - t_total_start
+        final_status_label = f"Analysis complete in {total_s:.0f} s"
+        status_box.update(
+            label=final_status_label, state="complete", expanded=False
+        )
         st.session_state["front_norm"] = front_norm
         st.session_state["side_norm"] = side_norm
         st.session_state["screened"] = screened
+        st.session_state["status_label"] = final_status_label
+        st.session_state["status_lines"] = status_lines
 
         with results_container:
             squat_type = render_type_card_into_slot(
                 type_card_slot, screened, survey_answers
             )
             with tab_front:
-                render_scene_check_buttons(screened["front"], "front")
+                render_scene_checks_with_inline_player(
+                    screened["front"], "front", front_norm
+                )
             with tab_side:
-                render_scene_check_buttons(screened["side"], "side")
-            render_active_scene_player_and_recommendations(
-                screened, front_norm, side_norm, survey_answers, squat_type
-            )
+                render_scene_checks_with_inline_player(
+                    screened["side"], "side", side_norm
+                )
+            render_recommendations(screened, survey_answers, squat_type)
 
     except ClipTooLongError:
         st.warning(CONTENT["messages"]["too_long"])
@@ -507,6 +534,11 @@ elif "screened" in st.session_state:
     screened_data = st.session_state["screened"]
     front_norm_data = st.session_state["front_norm"]
     side_norm_data = st.session_state["side_norm"]
+    with status_container:
+        saved_label = st.session_state.get("status_label", "Analysis complete")
+        with st.status(saved_label, state="complete", expanded=False):
+            for line in st.session_state.get("status_lines", []):
+                st.write(line)
     with results_container:
         st.subheader("3  Results")
         type_card_slot = st.empty()
@@ -519,15 +551,55 @@ elif "screened" in st.session_state:
                 build_view_table_html(screened_data["front"], "front"),
                 unsafe_allow_html=True,
             )
-            render_scene_check_buttons(screened_data["front"], "front")
+            render_scene_checks_with_inline_player(
+                screened_data["front"], "front", front_norm_data
+            )
         with tab_side:
             st.markdown(
                 build_view_table_html(screened_data["side"], "side"),
                 unsafe_allow_html=True,
             )
-            render_scene_check_buttons(screened_data["side"], "side")
-        render_active_scene_player_and_recommendations(
-            screened_data, front_norm_data, side_norm_data, survey_answers, squat_type
-        )
+            render_scene_checks_with_inline_player(
+                screened_data["side"], "side", side_norm_data
+            )
+        render_recommendations(screened_data, survey_answers, squat_type)
+
+st.subheader("4  Compare sessions")
+prev_front_upload = st.file_uploader(
+    "Previous front clip (mp4/mov)",
+    type=["mp4", "mov"],
+    key="prev_front_clip_uploader",
+)
+can_compare = (prev_front_upload is not None) and ("front_norm" in st.session_state)
+compare_clicked = st.button(
+    CONTENT["messages"]["compare_button"],
+    use_container_width=True,
+    disabled=not can_compare,
+)
+
+if compare_clicked and can_compare:
+    prev_raw = prev_front_upload.getvalue()
+    prev_suffix = Path(prev_front_upload.name).suffix or ".mp4"
+    try:
+        with st.spinner("Comparing sessions with Gemini 4 Argon…"):
+            prev_norm, _ = normalize_video_bytes(prev_raw, input_suffix=prev_suffix)
+            comparison_text = compare_front_sessions(
+                prev_norm, st.session_state["front_norm"]
+            )
+            st.session_state["compare_result"] = comparison_text
+    except ClipTooLongError:
+        st.warning(CONTENT["messages"]["too_long"])
+    except Exception:
+        st.warning("Couldn't compare the two sessions. Try again.")
+
+if st.session_state.get("compare_result"):
+    st.write(st.session_state["compare_result"])
+
+with st.expander("How it works", expanded=False):
+    how_sentences = [
+        s.strip() for s in CONTENT["messages"]["how_it_works"].split(".") if s.strip()
+    ]
+    for idx, sentence in enumerate(how_sentences, start=1):
+        st.write(f"{idx}  {sentence}.")
 
 st.caption(CONTENT["messages"]["footer"])

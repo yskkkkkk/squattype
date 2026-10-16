@@ -6,12 +6,15 @@ from unittest.mock import patch
 from logic import (
     align_reps_across_runs,
     apply_argon_result,
+    apply_group_scene_check,
     apply_user_scene_check,
     build_recheck_prompt,
+    build_scene_check_items,
     compute_scene_seek_seconds,
     compute_squat_type,
     count_pending_checks,
     format_provisional_line,
+    format_rep_span,
     is_cell_flagged,
     majority_vote,
     normalize_korean_value,
@@ -61,16 +64,16 @@ def test_apply_argon_result_success_and_timeout():
         }
     ]
     voted = vote_aligned_reps(aligned, view="front")
-    apply_argon_result(voted[0], {"knee": "안쪽(두 무릎 사이 간격이 좁아지거나)"})
+    apply_argon_result(voted[0], {"knee": "안쪽(두 무릎 사이 간격이 좁아지거나)"}, view="front")
     assert voted[0]["cells"]["knee"]["value"] == "V"
     assert voted[0]["cells"]["knee"]["status"] == "verified"
     assert voted[0]["cells"]["knee"]["timeout_reason"] is None
 
     voted_timeout = vote_aligned_reps(aligned, view="front")
-    apply_argon_result(voted_timeout[0], None)
+    apply_argon_result(voted_timeout[0], None, view="front")
     assert voted_timeout[0]["cells"]["knee"]["value"] == "V"
     assert voted_timeout[0]["cells"]["knee"]["status"] == "check"
-    assert voted_timeout[0]["cells"]["knee"]["timeout_reason"] == "Argon took too long on rep 2."
+    assert voted_timeout[0]["cells"]["knee"]["timeout_reason"] == "Argon took too long on front rep 2."
 
 
 def test_recheck_timeout_does_not_wait_for_slow_thread():
@@ -108,7 +111,7 @@ def test_recheck_timeout_does_not_wait_for_slow_thread():
     cell = screened["side"][0]["cells"]["depth"]
     assert cell["status"] == "check"
     assert cell["value"] == "H"
-    assert cell["timeout_reason"] == "Argon took too long on rep 3."
+    assert cell["timeout_reason"] == "Argon took too long on side rep 3."
 
 
 def test_align_reps_across_runs_mode_and_threshold():
@@ -349,4 +352,80 @@ def test_human_in_the_loop_scene_check_and_provisional():
     assert front[0]["cells"]["tempo"]["status"] == "confirmed"
     assert count_pending_checks(front, side) == 0
     assert format_provisional_line(0) is None
+
+
+def test_grouped_scene_checks_and_provisional_count():
+    assert format_rep_span([1, 2, 3, 4, 5]) == "reps 1–5"
+    assert format_rep_span([2, 4]) == "reps 2 and 4"
+    assert format_rep_span([3]) == "rep 3"
+
+    # 5 front reps: knees caved in on reps 1-5 (rep 3 is verified by Argon, others confirmed),
+    # plus 2 individual unclear ("check") cells on tempo (reps 2 and 5).
+    front = []
+    for r in range(1, 6):
+        front.append(
+            {
+                "rep": r,
+                "bottom": r * 4.0,
+                "cells": {
+                    "upper": {"value": "R", "status": "confirmed", "user_checked": None},
+                    "knee": {
+                        "value": "V",
+                        "status": "verified" if r == 3 else "confirmed",
+                        "user_checked": None,
+                    },
+                    "tempo": {
+                        "value": "C" if r in (2, 5) else "B",
+                        "status": "check" if r in (2, 5) else "confirmed",
+                        "user_checked": None,
+                    },
+                },
+                "disputed_axes": [],
+            }
+        )
+    side = [
+        {
+            "rep": r,
+            "bottom": r * 4.0,
+            "cells": {
+                "upper": {"value": "R", "status": "confirmed", "user_checked": None},
+                "depth": {"value": "D", "status": "confirmed", "user_checked": None},
+                "tempo": {"value": "B", "status": "confirmed", "user_checked": None},
+            },
+            "disputed_axes": [],
+        }
+        for r in range(1, 6)
+    ]
+
+    front_items = build_scene_check_items(front, "front")
+    # Expect: 3 groups (upper, knee, tempo) + 2 individual "check" cells on tempo (reps 2 and 5) = 5 items on front
+    group_items = [item for item in front_items if item["kind"] == "group"]
+    indiv_items = [item for item in front_items if item["kind"] == "individual"]
+    assert len(group_items) == 3
+    assert len(indiv_items) == 2
+
+    knee_group = next(item for item in group_items if item["axis"] == "knee")
+    assert knee_group["label"] == "Front clip · Knees caved in on reps 1–5"
+    # Representative rep prefers the one verified by Argon (rep 3, bottom 12.0s)
+    assert knee_group["representative_rep"] == 3
+    assert knee_group["bottom"] == 12.0
+    assert knee_group["seek_seconds"] == 11
+
+    # Side has 2 problem groups (upper R, tempo B) and 0 individual unclear cells
+    side_items = build_scene_check_items(side, "side")
+    assert len(side_items) == 2
+
+    # Total provisional count = 3 front groups + 2 front individual + 2 side groups = 7
+    assert count_pending_checks(front, side) == 7
+
+    # Clicking "Not quite" on the knee group flips all 5 knee cells to "A" and recomputes type to RADB
+    apply_group_scene_check(front, "knee", "not_quite")
+    assert all(rep["cells"]["knee"]["value"] == "A" for rep in front)
+    assert compute_squat_type(front, side) == "RADB"
+    assert count_pending_checks(front, side) == 6
+
+    # Clicking "Looks right" on the front upper group confirms all 5 upper cells
+    apply_group_scene_check(front, "upper", "looks_right")
+    assert all(rep["cells"]["upper"]["user_checked"] == "looks_right" for rep in front)
+    assert count_pending_checks(front, side) == 5
 

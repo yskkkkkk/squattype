@@ -83,6 +83,7 @@ def normalize_korean_value(axis: str, raw_value: Optional[str]) -> Optional[str]
 
 def normalize_rep_dict(raw_rep: Dict[str, Any], view: str) -> Dict[str, Any]:
     """Normalize a single rep dictionary from a model run."""
+    # low_confidence is requested by the validated prompt but intentionally ignored: in pre-event tests the model reported high confidence on wrong answers, so agreement across the 5 runs is our uncertainty signal.
     bottom = float(raw_rep.get("bottom", 0.0))
     pause_or_tempo = raw_rep.get("pause", raw_rep.get("tempo"))
     out: Dict[str, Any] = {
@@ -239,6 +240,7 @@ def vote_aligned_reps(
 def apply_argon_result(
     rep_entry: Dict[str, Any],
     raw_argon_json: Optional[Dict[str, Any]],
+    view: str = "front",
 ) -> None:
     """Update a disputed rep's cells in place from Argon's parsed JSON response.
 
@@ -267,7 +269,7 @@ def apply_argon_result(
         else:
             cell["value"] = cell["majority_value"]
             cell["status"] = "check"
-            cell["timeout_reason"] = f"Argon took too long on rep {rep_num}."
+            cell["timeout_reason"] = f"Argon took too long on {view} rep {rep_num}."
 
 
 def compute_view_axis_letter(reps: Sequence[Dict[str, Any]], axis: str) -> str:
@@ -316,6 +318,16 @@ def format_rep_list(rep_numbers: Sequence[int]) -> str:
         return f"reps {nums[0]} and {nums[1]}"
     leading = ", ".join(str(n) for n in nums[:-1])
     return f"reps {leading} and {nums[-1]}"
+
+
+def format_rep_span(rep_numbers: Sequence[int]) -> str:
+    """Format rep numbers using an en-dash span when contiguous (3+ reps), e.g. 'reps 1–5'."""
+    nums = sorted(set(int(x) for x in rep_numbers))
+    if not nums:
+        return ""
+    if len(nums) >= 3 and nums == list(range(nums[0], nums[-1] + 1)):
+        return f"reps {nums[0]}–{nums[-1]}"
+    return format_rep_list(nums)
 
 
 def build_why_line(
@@ -414,7 +426,7 @@ def select_recommendations(
 
 
 def is_cell_flagged(cell: Dict[str, Any], axis: str) -> bool:
-    """Return True if a cell needs or had a 'Check this scene' button."""
+    """Return True if a cell has a problem value, 'check' status, or was user-checked."""
     problem_code = AXIS_CODES[axis]["problem"]
     return (
         cell.get("value") == problem_code
@@ -423,27 +435,130 @@ def is_cell_flagged(cell: Dict[str, Any], axis: str) -> bool:
     )
 
 
-def is_cell_pending_check(cell: Dict[str, Any], axis: str) -> bool:
-    """Return True if a flagged cell has not yet been confirmed by the user."""
+def compute_scene_seek_seconds(bottom: float) -> int:
+    """Compute the integer video seek target in seconds (bottom - 1.0 s, clamped at 0)."""
+    return max(0, int(float(bottom) - 1.0))
+
+
+def _cell_belongs_to_problem_group(cell: Dict[str, Any], axis: str) -> bool:
+    """Return True if a cell belongs to the (view, axis) problem group (not an individual check cell)."""
     problem_code = AXIS_CODES[axis]["problem"]
-    needs_check = cell.get("value") == problem_code or cell.get("status") == "check"
-    return needs_check and cell.get("user_checked") is None
+    orig_status = cell.get("post_argon_status", cell.get("status", "confirmed"))
+    orig_value = cell.get("post_argon_value", cell.get("value"))
+    return orig_status != "check" and orig_value == problem_code
+
+
+def _cell_is_individual_unclear(cell: Dict[str, Any]) -> bool:
+    """Return True if a cell is an individual 'Please check this scene' cell."""
+    orig_status = cell.get("post_argon_status", cell.get("status", "confirmed"))
+    return orig_status == "check"
+
+
+def build_scene_check_items(
+    reps: Sequence[Dict[str, Any]],
+    view: str,
+) -> List[Dict[str, Any]]:
+    """Build grouped problem items and individual unclear items for a view.
+
+    - One group item per (view, axis) that has problem values (excluding 'check' cells).
+      Representative rep prefers a rep verified by Argon, else the first in the group.
+    - Individual items for any 'Please check this scene' ('check') cells.
+    """
+    view_title = "Front clip" if view == "front" else "Side clip"
+    axis_phrases = {
+        "upper": "Upper body rounded on",
+        "knee": "Knees caved in on",
+        "depth": "Depth was half on",
+        "tempo": "Tempo was bouncy on",
+    }
+    axis_labels = {
+        "upper": "Upper body",
+        "knee": "Knees",
+        "depth": "Depth",
+        "tempo": "Tempo",
+    }
+
+    items: List[Dict[str, Any]] = []
+
+    for axis in VIEW_AXES[view]:
+        group_reps = [
+            r
+            for r in reps
+            if _cell_belongs_to_problem_group(r.get("cells", {}).get(axis, {}), axis)
+        ]
+        if not group_reps:
+            continue
+
+        verified_reps = [
+            r
+            for r in group_reps
+            if r["cells"][axis].get("post_argon_status", r["cells"][axis].get("status"))
+            == "verified"
+        ]
+        rep_to_seek = verified_reps[0] if verified_reps else group_reps[0]
+        rep_nums = [r["rep"] for r in group_reps]
+        span_str = format_rep_span(rep_nums)
+        pending = any(
+            r["cells"][axis].get("user_checked") is None for r in group_reps
+        )
+        user_checked = (
+            None
+            if pending
+            else group_reps[0]["cells"][axis].get("user_checked")
+        )
+
+        items.append(
+            {
+                "id": f"group_{view}_{axis}",
+                "kind": "group",
+                "view": view,
+                "axis": axis,
+                "reps": rep_nums,
+                "representative_rep": rep_to_seek["rep"],
+                "bottom": float(rep_to_seek["bottom"]),
+                "seek_seconds": compute_scene_seek_seconds(rep_to_seek["bottom"]),
+                "label": f"{view_title} · {axis_phrases[axis]} {span_str}",
+                "pending": pending,
+                "user_checked": user_checked,
+            }
+        )
+
+    for rep_entry in reps:
+        rep_num = rep_entry["rep"]
+        cells = rep_entry.get("cells", {})
+        for axis in VIEW_AXES[view]:
+            cell = cells.get(axis, {})
+            if not _cell_is_individual_unclear(cell):
+                continue
+            pending = cell.get("user_checked") is None
+            items.append(
+                {
+                    "id": f"cell_{view}_{rep_num}_{axis}",
+                    "kind": "individual",
+                    "view": view,
+                    "axis": axis,
+                    "reps": [rep_num],
+                    "representative_rep": rep_num,
+                    "bottom": float(rep_entry["bottom"]),
+                    "seek_seconds": compute_scene_seek_seconds(rep_entry["bottom"]),
+                    "label": f"{view_title} · rep {rep_num} · {axis_labels[axis]} — Please check this scene",
+                    "pending": pending,
+                    "user_checked": cell.get("user_checked"),
+                }
+            )
+
+    return items
 
 
 def count_pending_checks(
     front_reps: Sequence[Dict[str, Any]],
     side_reps: Sequence[Dict[str, Any]],
 ) -> int:
-    """Count how many flagged cells across front and side clips still await user check."""
-    pending = 0
-    for view, reps in (("front", front_reps), ("side", side_reps)):
-        for rep_entry in reps:
-            cells = rep_entry.get("cells", {})
-            for axis in VIEW_AXES[view]:
-                cell = cells.get(axis, {})
-                if is_cell_pending_check(cell, axis):
-                    pending += 1
-    return pending
+    """Count pending scene confirmations: number of pending groups + individual unclear cells."""
+    all_items = build_scene_check_items(front_reps, "front") + build_scene_check_items(
+        side_reps, "side"
+    )
+    return sum(1 for item in all_items if item["pending"])
 
 
 def format_provisional_line(pending_count: int) -> Optional[str]:
@@ -454,17 +569,12 @@ def format_provisional_line(pending_count: int) -> Optional[str]:
     return f"Provisional until you check {pending_count} {noun}."
 
 
-def compute_scene_seek_seconds(bottom: float) -> int:
-    """Compute the integer video seek target in seconds (bottom - 1.0 s, clamped at 0)."""
-    return max(0, int(float(bottom) - 1.0))
-
-
 def apply_user_scene_check(
     rep_entry: Dict[str, Any],
     axis: str,
     response: str,
 ) -> None:
-    """Apply the user's 'looks_right' or 'not_quite' answer to a cell in place."""
+    """Apply the user's 'looks_right' or 'not_quite' answer to a single cell in place."""
     cell = rep_entry["cells"][axis]
     cell.setdefault("post_argon_value", cell["value"])
     cell.setdefault("post_argon_status", cell.get("status", "confirmed"))
@@ -479,4 +589,17 @@ def apply_user_scene_check(
         cell["user_checked"] = "looks_right"
     else:
         raise ValueError(f"Unsupported scene check response: {response}")
+
+
+def apply_group_scene_check(
+    reps: Sequence[Dict[str, Any]],
+    axis: str,
+    response: str,
+) -> None:
+    """Apply 'looks_right' or 'not_quite' to all cells in a (view, axis) problem group."""
+    for rep_entry in reps:
+        cell = rep_entry.get("cells", {}).get(axis, {})
+        if _cell_belongs_to_problem_group(cell, axis):
+            apply_user_scene_check(rep_entry, axis, response)
+
 

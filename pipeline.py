@@ -441,7 +441,7 @@ def recheck_disputed_reps_progressive(
             except Exception:
                 raw_json = None
 
-            apply_argon_result(rep_entry, raw_json)
+            apply_argon_result(rep_entry, raw_json, view=view)
             done_labels.append(f"{view} rep {rep_num} done")
             yield _make_progress_payload()
     except FuturesTimeoutError:
@@ -454,6 +454,46 @@ def recheck_disputed_reps_progressive(
             pending_futs.discard(fut)
             view, rep_entry = future_to_task[fut]
             rep_num = rep_entry["rep"]
-            apply_argon_result(rep_entry, None)
+            apply_argon_result(rep_entry, None, view=view)
             done_labels.append(f"{view} rep {rep_num} done")
         yield _make_progress_payload()
+
+
+PROMPT_COMPARE = """첫 번째 영상은 지난 세션, 두 번째 영상은 오늘 세션이야. 둘 다 정면에서 찍은 같은 사람의 맨몸 스쿼트야.
+상체(시선·등), 무릎 방향, 바닥 정지 세 가지에 대해 지난 세션 대비 오늘 무엇이 좋아졌고 무엇이 남았는지 말해줘.
+근거가 되는 장면의 시각(영상 번호와 초)을 함께 적어. 각 항목 한두 문장, 영어로."""
+
+
+def compare_front_sessions(
+    previous_front_norm: bytes,
+    today_front_norm: bytes,
+    timeout_seconds: float = 45.0,
+) -> str:
+    """Compare previous and today's normalized front clips using Gemini 4 Argon."""
+    prev_b64 = base64.b64encode(previous_front_norm).decode("ascii")
+    today_b64 = base64.b64encode(today_front_norm).decode("ascii")
+    client = get_genai_client(timeout_seconds=timeout_seconds)
+
+    interaction = client.interactions.create(
+        model="gemini-4-argon",
+        input=[
+            {
+                "type": "video",
+                "data": prev_b64,
+                "mime_type": "video/mp4",
+                "resolution": "high",
+                "processing": {"type": "static", "fps": 2},
+            },
+            {
+                "type": "video",
+                "data": today_b64,
+                "mime_type": "video/mp4",
+                "resolution": "high",
+                "processing": {"type": "static", "fps": 2},
+            },
+            {"type": "text", "text": PROMPT_COMPARE},
+        ],
+        generation_config={"thinking_level": "low"},
+    )
+    return (interaction.output_text or "").strip()
+
