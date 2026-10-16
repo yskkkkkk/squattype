@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+*.key
+key.txt
+*.mp4
+*.mov
+test_videos/
+__pycache__/
+*.pyc
+.pytest_cache/
+.streamlit/secrets.toml
+tests/
+BUILD_BRIEF.md
+DESIGN.md

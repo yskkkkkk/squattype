@@ -1,0 +1,4 @@
+streamlit
+google-genai>=2.29
+imageio-ffmpeg
+pytest
