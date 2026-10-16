@@ -411,3 +411,72 @@ def select_recommendations(
         "level": level,
         "items": selected_items,
     }
+
+
+def is_cell_flagged(cell: Dict[str, Any], axis: str) -> bool:
+    """Return True if a cell needs or had a 'Check this scene' button."""
+    problem_code = AXIS_CODES[axis]["problem"]
+    return (
+        cell.get("value") == problem_code
+        or cell.get("status") == "check"
+        or cell.get("user_checked") is not None
+    )
+
+
+def is_cell_pending_check(cell: Dict[str, Any], axis: str) -> bool:
+    """Return True if a flagged cell has not yet been confirmed by the user."""
+    problem_code = AXIS_CODES[axis]["problem"]
+    needs_check = cell.get("value") == problem_code or cell.get("status") == "check"
+    return needs_check and cell.get("user_checked") is None
+
+
+def count_pending_checks(
+    front_reps: Sequence[Dict[str, Any]],
+    side_reps: Sequence[Dict[str, Any]],
+) -> int:
+    """Count how many flagged cells across front and side clips still await user check."""
+    pending = 0
+    for view, reps in (("front", front_reps), ("side", side_reps)):
+        for rep_entry in reps:
+            cells = rep_entry.get("cells", {})
+            for axis in VIEW_AXES[view]:
+                cell = cells.get(axis, {})
+                if is_cell_pending_check(cell, axis):
+                    pending += 1
+    return pending
+
+
+def format_provisional_line(pending_count: int) -> Optional[str]:
+    """Return the provisional notice for the type card while confirmations are pending."""
+    if pending_count <= 0:
+        return None
+    noun = "scene" if pending_count == 1 else "scenes"
+    return f"Provisional until you check {pending_count} {noun}."
+
+
+def compute_scene_seek_seconds(bottom: float) -> int:
+    """Compute the integer video seek target in seconds (bottom - 1.0 s, clamped at 0)."""
+    return max(0, int(float(bottom) - 1.0))
+
+
+def apply_user_scene_check(
+    rep_entry: Dict[str, Any],
+    axis: str,
+    response: str,
+) -> None:
+    """Apply the user's 'looks_right' or 'not_quite' answer to a cell in place."""
+    cell = rep_entry["cells"][axis]
+    cell.setdefault("post_argon_value", cell["value"])
+    cell.setdefault("post_argon_status", cell.get("status", "confirmed"))
+    if response == "not_quite":
+        cell["value"] = AXIS_CODES[axis]["good"]
+        cell["status"] = "confirmed"
+        cell["user_checked"] = "not_quite"
+    elif response == "looks_right":
+        cell["value"] = cell.get("post_argon_value", cell["value"])
+        orig_status = cell.get("post_argon_status", "confirmed")
+        cell["status"] = "confirmed" if orig_status == "check" else orig_status
+        cell["user_checked"] = "looks_right"
+    else:
+        raise ValueError(f"Unsupported scene check response: {response}")
+

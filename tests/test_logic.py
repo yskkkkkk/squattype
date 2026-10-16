@@ -6,8 +6,13 @@ from unittest.mock import patch
 from logic import (
     align_reps_across_runs,
     apply_argon_result,
+    apply_user_scene_check,
     build_recheck_prompt,
+    compute_scene_seek_seconds,
     compute_squat_type,
+    count_pending_checks,
+    format_provisional_line,
+    is_cell_flagged,
     majority_vote,
     normalize_korean_value,
     select_recommendations,
@@ -295,3 +300,53 @@ def test_select_recommendations_rules():
     assert res_clear["level"] == "Regular"
     assert len(res_clear["items"]) == 1
     assert res_clear["items"][0]["name"] == "Bulgarian split squat"
+
+
+def test_human_in_the_loop_scene_check_and_provisional():
+    assert compute_scene_seek_seconds(0.4) == 0
+    assert compute_scene_seek_seconds(8.9) == 7
+
+    front = [
+        {
+            "rep": 1,
+            "bottom": 3.5,
+            "cells": {
+                "upper": {"value": "S", "status": "confirmed", "user_checked": None},
+                "knee": {"value": "V", "status": "verified", "user_checked": None},
+                "tempo": {"value": "C", "status": "check", "user_checked": None},
+            },
+            "disputed_axes": ["knee", "tempo"],
+        }
+    ]
+    side = [
+        {
+            "rep": 1,
+            "bottom": 3.5,
+            "cells": {
+                "upper": {"value": "S", "status": "confirmed", "user_checked": None},
+                "depth": {"value": "D", "status": "confirmed", "user_checked": None},
+                "tempo": {"value": "C", "status": "confirmed", "user_checked": None},
+            },
+            "disputed_axes": [],
+        }
+    ]
+
+    assert is_cell_flagged(front[0]["cells"]["upper"], "upper") is False
+    assert is_cell_flagged(front[0]["cells"]["knee"], "knee") is True
+    assert is_cell_flagged(front[0]["cells"]["tempo"], "tempo") is True
+    assert count_pending_checks(front, side) == 2
+    assert format_provisional_line(2) == "Provisional until you check 2 scenes."
+
+    # User says 'Not quite' on knee -> flips V to A, pending drops to 1
+    apply_user_scene_check(front[0], "knee", "not_quite")
+    assert front[0]["cells"]["knee"]["value"] == "A"
+    assert count_pending_checks(front, side) == 1
+    assert format_provisional_line(1) == "Provisional until you check 1 scene."
+    assert compute_squat_type(front, side) == "SADC"
+
+    # User says 'Looks right' on tempo ('Please check this scene') -> confirmed, pending drops to 0
+    apply_user_scene_check(front[0], "tempo", "looks_right")
+    assert front[0]["cells"]["tempo"]["status"] == "confirmed"
+    assert count_pending_checks(front, side) == 0
+    assert format_provisional_line(0) is None
+
