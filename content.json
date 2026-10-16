@@ -1,0 +1,267 @@
+{
+ "app_name": "SquatType",
+ "axes": {
+  "upper": {
+   "label": "Upper body",
+   "good": [
+    "S",
+    "Straight"
+   ],
+   "problem": [
+    "R",
+    "Rounded"
+   ]
+  },
+  "knee": {
+   "label": "Knees",
+   "good": [
+    "A",
+    "Aligned"
+   ],
+   "problem": [
+    "V",
+    "Caving in"
+   ]
+  },
+  "depth": {
+   "label": "Depth",
+   "good": [
+    "D",
+    "Deep"
+   ],
+   "problem": [
+    "H",
+    "Half"
+   ]
+  },
+  "tempo": {
+   "label": "Tempo",
+   "good": [
+    "C",
+    "Controlled"
+   ],
+   "problem": [
+    "B",
+    "Bouncy"
+   ]
+  }
+ },
+ "status": {
+  "confirmed": "Confirmed",
+  "verifying": "Verifying with Gemini 4 Argon…",
+  "verified": "Verified by Argon",
+  "check": "Please check this scene",
+  "check_button": "Check this scene",
+  "looks_right": "Looks right",
+  "not_quite": "Not quite",
+  "provisional": "Provisional until you check the flagged scenes"
+ },
+ "types": {
+  "SADC": [
+   "The Textbook",
+   "Every box ticked. Time to add reps."
+  ],
+  "SADB": [
+   "The Express Train",
+   "Perfect form, no stops at the station."
+  ],
+  "SAHC": [
+   "The Tiptoer",
+   "Careful and controlled, just not all the way down."
+  ],
+  "SAHB": [
+   "The Morning Commuter",
+   "Half a squat, full speed."
+  ],
+  "SVDC": [
+   "The Focused Craftsman",
+   "Deep and steady, but the knees drift in."
+  ],
+  "SVDB": [
+   "The Spring",
+   "Deep, bouncy, knees caving on the way up."
+  ],
+  "SVHC": [
+   "The Shy Knees",
+   "Slow and careful, knees hiding inward."
+  ],
+  "SVHB": [
+   "The Pogo",
+   "Quick little hops with knees together."
+  ],
+  "RADC": [
+   "The Leg Day Artisan",
+   "Strong legs, chest asking for attention."
+  ],
+  "RADB": [
+   "The Charger",
+   "Head down, full speed ahead."
+  ],
+  "RAHC": [
+   "The Phone Scroller",
+   "Eyes on the floor like it has notifications."
+  ],
+  "RAHB": [
+   "The Evening Commuter",
+   "Tired back, half squat, out the door."
+  ],
+  "RVDC": [
+   "The Curled-up Cat",
+   "Deep and patient, but curled like a cat."
+  ],
+  "RVDB": [
+   "The Roller Coaster",
+   "All the drops, none of the brakes."
+  ],
+  "RVHC": [
+   "The Sprout",
+   "Everything is still growing. Great place to start."
+  ],
+  "RVHB": [
+   "The First Step",
+   "Day one energy. Every rep from here is progress."
+  ]
+ },
+ "recommendations": {
+  "priority": [
+   "V",
+   "R",
+   "H",
+   "B"
+  ],
+  "V": {
+   "Beginner": {
+    "name": "Clamshell",
+    "line": "Lie on your side and open your knees like a clam. Wakes up the hip muscles that keep knees out."
+   },
+   "Sometimes": {
+    "name": "Band squat",
+    "line": "The band pulls your knees in. Don't let it win."
+   },
+   "Regular": {
+    "name": "Lateral band walk",
+    "line": "Half-squat and walk sideways like a crab. If your hips burn, you're doing it right."
+   }
+  },
+  "R": {
+   "Beginner": {
+    "name": "Thoracic foam-roller stretch",
+    "line": "Drape your upper back over a foam roller and lean back. Undo the desk hunch."
+   },
+   "Sometimes": {
+    "name": "Goblet squat",
+    "line": "A weight at your chest is a counterbalance. A water bottle works too."
+   },
+   "Regular": {
+    "name": "Wall-facing squat",
+    "line": "Squat a hand's width from a wall. Lean forward and your nose finds out first."
+   }
+  },
+  "H": {
+   "Beginner": {
+    "name": "Box squat (high box)",
+    "line": "Touch the chair, stand up. The chair remembers your depth for you."
+   },
+   "Sometimes": {
+    "name": "Box squat (low box)",
+    "line": "One notch lower. Wherever you touch is today's depth."
+   },
+   "Regular": {
+    "name": "Goblet squat 10-second bottom hold",
+    "line": "Ten seconds at the bottom. The depth you hold is the depth you keep."
+   }
+  },
+  "B": {
+   "Beginner": {
+    "name": "Tempo squat 2s down, 1s hold",
+    "line": "Two down, one hold. The bounce clocks out here."
+   },
+   "Sometimes": {
+    "name": "Tempo squat 3s down, 1s hold",
+    "line": "Count one, two, three. Muscles work while the bounce rests."
+   },
+   "Regular": {
+    "name": "Tempo squat 5s down, 3s hold",
+    "line": "Five down, three hold. The longest eight seconds of your life."
+   }
+  },
+  "all_clear": {
+   "Beginner": {
+    "name": "Bodyweight squat 3 x 15",
+    "line": "Your form is textbook. Now stack the reps."
+   },
+   "Sometimes": {
+    "name": "Jump squat",
+    "line": "Squat right, then up. Land quiet as a cat."
+   },
+   "Regular": {
+    "name": "Bulgarian split squat",
+    "line": "Back foot on a chair, one leg down. The Textbook's next chapter."
+   }
+  },
+  "label": "General exercise examples"
+ },
+ "tips": [
+  "Arms nowhere to go? Reach them forward. Your chest will follow.",
+  "Pick a spot 2–3 m ahead on the floor. That's your eyes' reserved seat.",
+  "Just tap the chair with your hips. Sitting down is cheating.",
+  "Push the floor apart with your feet. Your knees will head out.",
+  "Count \"one, two\" at the bottom. Two beats and the bounce is gone."
+ ],
+ "survey": [
+  {
+   "id": "pain",
+   "question": "Any knee or back pain when you exercise?",
+   "options": [
+    "No",
+    "Yes"
+   ]
+  },
+  {
+   "id": "experience",
+   "question": "How much do you work out?",
+   "options": [
+    "Beginner",
+    "Sometimes",
+    "Regular"
+   ]
+  },
+  {
+   "id": "goal",
+   "question": "What's your goal?",
+   "options": [
+    "Fitness",
+    "Strength",
+    "Better posture"
+   ]
+  },
+  {
+   "id": "days",
+   "question": "How many days a week can you train?",
+   "options": [
+    "1–2",
+    "3–4",
+    "5+"
+   ]
+  },
+  {
+   "id": "day_posture",
+   "question": "How do you spend most of your day?",
+   "options": [
+    "Sitting",
+    "Standing",
+    "On the move"
+   ]
+  }
+ ],
+ "messages": {
+  "footer": "Form feedback, not medical advice. Videos are analyzed in memory and never stored.",
+  "pain": "Since you mentioned pain, we'll show your form feedback but skip exercise picks. Please check with a physical therapist or doctor first.",
+  "upload_guide": "Camera at hip height, 2–3 m away, head to toe in frame. Side view at exactly 90°. 4–5 reps, about 20 seconds. Stand fully up between reps. Record at 1080p 30 fps.",
+  "compare_button": "Compare with my last session",
+  "sitting_rounded": "Your chair has been training you to be The Phone Scroller. Time to fight back.",
+  "how_it_works": "Gemini 3.8 Flash screens every rep five times. Gemini 4 Argon re-checks only the reps where the votes split. You confirm anything still unclear.",
+  "too_long": "Please keep each clip under 30 seconds and 30 MB. Recording at 1080p 30 fps keeps files small.",
+  "preparing": "Preparing your clips…"
+ }
+}
