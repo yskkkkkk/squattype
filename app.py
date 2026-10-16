@@ -1,6 +1,7 @@
 import html
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List
 
@@ -378,7 +379,7 @@ analyze_clicked = st.button(
 status_container = st.container()
 results_container = st.container()
 
-if analyze_clicked and both_uploaded:
+if (analyze_clicked or st.session_state.pop("retry_requested", False)) and both_uploaded:
     st.session_state.pop("active_scene_id", None)
     st.session_state.pop("active_scene_seek", None)
     st.session_state.pop("compare_result", None)
@@ -528,7 +529,10 @@ if analyze_clicked and both_uploaded:
     except ModelParseError as err:
         st.warning(f"Couldn't read the result for the {err.view} clip. Try again.")
         if st.button("Try again"):
+            st.session_state["retry_requested"] = True
             st.rerun()
+    except Exception:
+        st.warning("Couldn't read this clip. Try a different file.")
 
 elif "screened" in st.session_state:
     screened_data = st.session_state["screened"]
@@ -597,9 +601,11 @@ if st.session_state.get("compare_result"):
 
 with st.expander("How it works", expanded=False):
     how_sentences = [
-        s.strip() for s in CONTENT["messages"]["how_it_works"].split(".") if s.strip()
+        s.strip()
+        for s in re.split(r"(?<=\.)\s+", CONTENT["messages"]["how_it_works"])
+        if s.strip()
     ]
     for idx, sentence in enumerate(how_sentences, start=1):
-        st.write(f"{idx}  {sentence}.")
+        st.write(f"{idx}  {sentence}")
 
 st.caption(CONTENT["messages"]["footer"])

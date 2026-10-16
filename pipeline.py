@@ -100,6 +100,7 @@ def _probe_duration_seconds(src_path: str, ffmpeg_exe: str) -> float:
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=60,
     )
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", proc.stderr)
     if match:
@@ -153,7 +154,7 @@ def normalize_clip(raw_bytes: bytes, suffix: str = ".mp4") -> Tuple[bytes, float
             "+faststart",
             dst_path,
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
 
         with open(dst_path, "rb") as f:
             normalized_bytes = f.read()
@@ -182,12 +183,21 @@ def normalize_both_clips(
 
 
 def strip_json_fences(text: str) -> str:
-    """Strip markdown code fences surrounding JSON output."""
+    """Strip markdown code fences surrounding JSON output, falling back to first/last bracket."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
-    return cleaned.strip()
+    cleaned = cleaned.strip()
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except Exception:
+        starts = [i for i in (cleaned.find("{"), cleaned.find("[")) if i != -1]
+        ends = [i for i in (cleaned.rfind("}"), cleaned.rfind("]")) if i != -1]
+        if starts and ends and min(starts) < max(ends):
+            return cleaned[min(starts) : max(ends) + 1]
+        return cleaned
 
 
 def get_genai_client(timeout_seconds: float = 30.0) -> genai.Client:
@@ -474,26 +484,33 @@ def compare_front_sessions(
     today_b64 = base64.b64encode(today_front_norm).decode("ascii")
     client = get_genai_client(timeout_seconds=timeout_seconds)
 
-    interaction = client.interactions.create(
-        model="gemini-4-argon",
-        input=[
-            {
-                "type": "video",
-                "data": prev_b64,
-                "mime_type": "video/mp4",
-                "resolution": "high",
-                "processing": {"type": "static", "fps": 2},
-            },
-            {
-                "type": "video",
-                "data": today_b64,
-                "mime_type": "video/mp4",
-                "resolution": "high",
-                "processing": {"type": "static", "fps": 2},
-            },
-            {"type": "text", "text": PROMPT_COMPARE},
-        ],
-        generation_config={"thinking_level": "low"},
-    )
-    return (interaction.output_text or "").strip()
+    last_error = None
+    for _ in range(2):
+        try:
+            interaction = client.interactions.create(
+                model="gemini-4-argon",
+                input=[
+                    {
+                        "type": "video",
+                        "data": prev_b64,
+                        "mime_type": "video/mp4",
+                        "resolution": "high",
+                        "processing": {"type": "static", "fps": 2},
+                    },
+                    {
+                        "type": "video",
+                        "data": today_b64,
+                        "mime_type": "video/mp4",
+                        "resolution": "high",
+                        "processing": {"type": "static", "fps": 2},
+                    },
+                    {"type": "text", "text": PROMPT_COMPARE},
+                ],
+                generation_config={"thinking_level": "low"},
+            )
+            return (interaction.output_text or "").strip()
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError("Session comparison failed.") from last_error
 

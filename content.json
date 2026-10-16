@@ -257,7 +257,7 @@
  "messages": {
   "footer": "Form feedback, not medical advice. Videos are analyzed in memory and never stored.",
   "pain": "Since you mentioned pain, we'll show your form feedback but skip exercise picks. Please check with a physical therapist or doctor first.",
-  "upload_guide": "Camera at hip height, 2–3 m away, head to toe in frame. Side view at exactly 90°. 4–5 reps, about 20 seconds. Stand fully up between reps. Record at 1080p 30 fps.",
+  "upload_guide": "Camera at hip height, 2–3 m away, head to toe in frame. Side view at exactly 90°. 4–5 reps, about 20 seconds. Stand fully up between reps. Record at 720p 30 fps.",
   "compare_button": "Compare with my last session",
   "sitting_rounded": "Your chair has been training you to be The Phone Scroller. Time to fight back.",
   "how_it_works": "Gemini 3.8 Flash screens every rep five times. Gemini 4 Argon re-checks only the reps where the votes split. You confirm anything still unclear.",

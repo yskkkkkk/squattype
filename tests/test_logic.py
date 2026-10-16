@@ -21,11 +21,25 @@ from logic import (
     select_recommendations,
     vote_aligned_reps,
 )
-from pipeline import recheck_disputed_reps_progressive, screen_both_clips
+from pipeline import (
+    recheck_disputed_reps_progressive,
+    screen_both_clips,
+    strip_json_fences,
+)
 
 CONTENT_PATH = Path(__file__).parent.parent / "content.json"
 with open(CONTENT_PATH, "r", encoding="utf-8") as f:
     CONTENT = json.load(f)
+
+
+def test_strip_json_fences_with_leading_sentence():
+    raw = 'Here is the JSON analysis for your clip:\n{"reps": [{"rep": 1, "bottom": 2.5}]}'
+    cleaned = strip_json_fences(raw)
+    parsed = json.loads(cleaned)
+    assert parsed == {"reps": [{"rep": 1, "bottom": 2.5}]}
+
+    raw_array = "Sure! Below is the list:\n[{\"rep\": 1}]\nHope this helps."
+    assert json.loads(strip_json_fences(raw_array)) == [{"rep": 1}]
 
 
 def test_normalize_korean_value_strips_parentheses_and_spaces():
