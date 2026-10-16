@@ -13,7 +13,7 @@ from logic import (
     select_recommendations,
     vote_aligned_reps,
 )
-from pipeline import recheck_disputed_reps_progressive
+from pipeline import recheck_disputed_reps_progressive, screen_both_clips
 
 CONTENT_PATH = Path(__file__).parent.parent / "content.json"
 with open(CONTENT_PATH, "r", encoding="utf-8") as f:
@@ -47,6 +47,7 @@ def test_apply_argon_result_success_and_timeout():
         {
             "rep": 2,
             "bottom": 8.8,
+            "successful_runs": 5,
             "votes": {
                 "upper": ["S", "S", "S", "S", "S"],
                 "knee": ["V", "V", "V", "A", "A"],
@@ -54,14 +55,13 @@ def test_apply_argon_result_success_and_timeout():
             },
         }
     ]
-    voted = vote_aligned_reps(aligned, view="front", expected_runs=5)
+    voted = vote_aligned_reps(aligned, view="front")
     apply_argon_result(voted[0], {"knee": "안쪽(두 무릎 사이 간격이 좁아지거나)"})
     assert voted[0]["cells"]["knee"]["value"] == "V"
     assert voted[0]["cells"]["knee"]["status"] == "verified"
     assert voted[0]["cells"]["knee"]["timeout_reason"] is None
 
-    # Timeout fallback uses majority_value and sets status='check'
-    voted_timeout = vote_aligned_reps(aligned, view="front", expected_runs=5)
+    voted_timeout = vote_aligned_reps(aligned, view="front")
     apply_argon_result(voted_timeout[0], None)
     assert voted_timeout[0]["cells"]["knee"]["value"] == "V"
     assert voted_timeout[0]["cells"]["knee"]["status"] == "check"
@@ -73,6 +73,7 @@ def test_recheck_timeout_does_not_wait_for_slow_thread():
         {
             "rep": 3,
             "bottom": 12.0,
+            "successful_runs": 5,
             "votes": {
                 "upper": ["S", "S", "S", "S", "S"],
                 "depth": ["D", "H", "H", "D", "H"],
@@ -82,22 +83,22 @@ def test_recheck_timeout_does_not_wait_for_slow_thread():
     ]
     screened = {
         "front": [],
-        "side": vote_aligned_reps(aligned, view="side", expected_runs=5),
+        "side": vote_aligned_reps(aligned, view="side"),
     }
 
     def slow_argon(*args, **kwargs):
-        time.sleep(5.0)
+        time.sleep(0.6)
         return {"depth": "깊음"}
 
     t0 = time.monotonic()
     with patch("pipeline.call_argon_recheck_once", side_effect=slow_argon):
         events = list(
             recheck_disputed_reps_progressive(
-                b"front", b"side", screened, timeout_seconds=0.2
+                b"front", b"side", screened, timeout_seconds=0.15
             )
         )
     elapsed = time.monotonic() - t0
-    assert elapsed < 1.0
+    assert elapsed < 0.45
     assert len(events) == 1
     cell = screened["side"][0]["cells"]["depth"]
     assert cell["status"] == "check"
@@ -128,6 +129,79 @@ def test_align_reps_across_runs_mode_and_threshold():
     assert aligned[1]["votes"]["knee"] == [None, "V", "V"]
 
 
+def test_four_successful_runs_plus_one_failed_run():
+    good_run = [
+        {"rep": 1, "bottom": 2.5, "upper": "곧음", "knee": "정렬", "pause": "충분"},
+    ]
+    # 4 successful runs + 1 failed empty run
+    aligned = align_reps_across_runs(
+        [good_run, [], good_run, good_run, good_run], view="front"
+    )
+    assert len(aligned) == 1
+    assert aligned[0]["successful_runs"] == 4
+    assert aligned[0]["votes"]["upper"] == ["S", "S", "S", "S"]
+
+    voted = vote_aligned_reps(aligned, view="front", min_successful_runs=3)
+    cells = voted[0]["cells"]
+    assert cells["upper"]["status"] == "confirmed"
+    assert cells["upper"]["disputed"] is False
+    assert cells["knee"]["status"] == "confirmed"
+    assert cells["tempo"]["status"] == "confirmed"
+    assert voted[0]["disputed_axes"] == []
+
+    # Also verify via screen_both_clips when 1 of 5 Flash calls raises an error
+    call_counter = {"front": 0, "side": 0}
+
+    def fake_flash(norm_bytes, view, timeout_seconds=30.0):
+        call_counter[view] += 1
+        if view == "front" and call_counter["front"] == 1:
+            raise RuntimeError("Transient Flash error")
+        if view == "front":
+            return {"reps": list(good_run)}
+        return {
+            "reps": [
+                {"rep": 1, "bottom": 2.5, "upper": "곧음", "depth": "깊음", "pause": "충분"}
+            ]
+        }
+
+    with patch("pipeline.call_flash_once", side_effect=fake_flash):
+        screened = screen_both_clips(b"front", b"side", runs_per_clip=5)
+    assert call_counter["front"] == 5  # 4 succeeded >= 3, so no retry needed
+    assert screened["front"][0]["cells"]["upper"]["status"] == "confirmed"
+    assert screened["front"][0]["disputed_axes"] == []
+
+
+def test_fewer_than_three_successful_runs_retries_and_marks_disputed():
+    good_side_rep = [
+        {"rep": 1, "bottom": 2.5, "upper": "곧음", "depth": "깊음", "pause": "충분"}
+    ]
+    front_calls = {"n": 0}
+
+    def mostly_failing_flash(norm_bytes, view, timeout_seconds=30.0):
+        if view == "side":
+            return {"reps": list(good_side_rep)}
+        front_calls["n"] += 1
+        # Only 2 succeed across initial 5 + 3 retries
+        if front_calls["n"] in (1, 2):
+            return {
+                "reps": [
+                    {"rep": 1, "bottom": 2.5, "upper": "곧음", "knee": "정렬", "pause": "충분"}
+                ]
+            }
+        raise RuntimeError("Flash failure")
+
+    with patch("pipeline.call_flash_once", side_effect=mostly_failing_flash):
+        screened = screen_both_clips(b"front", b"side", runs_per_clip=5)
+
+    # Initial 5 calls had 2 successes (<3) and 3 failures -> retried the 3 failed runs once (total 8)
+    assert front_calls["n"] == 8
+    # Since still only 2 runs succeeded (<3), every cell on front is marked disputed
+    assert set(screened["front"][0]["disputed_axes"]) == {"upper", "knee", "tempo"}
+    for ax in ("upper", "knee", "tempo"):
+        assert screened["front"][0]["cells"][ax]["disputed"] is True
+        assert screened["front"][0]["cells"][ax]["status"] == "verifying"
+
+
 def test_majority_vote_tie_breaks_to_problem():
     assert majority_vote(["S", "S", "R", "R", None], "upper") == "R"
     assert majority_vote(["A", "A", "A", "V", "V"], "knee") == "A"
@@ -139,6 +213,7 @@ def test_vote_aligned_reps_confirmed_vs_disputed():
         {
             "rep": 1,
             "bottom": 2.5,
+            "successful_runs": 5,
             "votes": {
                 "upper": ["S", "S", "S", "S", "S"],
                 "knee": ["A", "V", "V", "V", "A"],
@@ -146,7 +221,7 @@ def test_vote_aligned_reps_confirmed_vs_disputed():
             },
         }
     ]
-    voted = vote_aligned_reps(aligned, view="front", expected_runs=5)
+    voted = vote_aligned_reps(aligned, view="front")
     cells = voted[0]["cells"]
     assert cells["upper"]["status"] == "confirmed"
     assert cells["upper"]["disputed"] is False

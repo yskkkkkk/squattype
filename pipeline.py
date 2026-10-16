@@ -244,9 +244,13 @@ def screen_both_clips(
     runs_per_clip: int = 5,
     timeout_seconds: float = 30.0,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Run 5 parallel Flash calls per clip (10 total) and align + vote reps."""
-    front_runs: List[List[Dict[str, Any]]] = [[] for _ in range(runs_per_clip)]
-    side_runs: List[List[Dict[str, Any]]] = [[] for _ in range(runs_per_clip)]
+    """Run 5 parallel Flash calls per clip (10 total) and align + vote reps.
+
+    Drops failed/empty runs. If fewer than 3 runs succeed for a clip, retries
+    the failed runs once.
+    """
+    front_runs: List[List[Dict[str, Any]]] = []
+    side_runs: List[List[Dict[str, Any]]] = []
 
     with ThreadPoolExecutor(max_workers=runs_per_clip * 2) as pool:
         front_futs = [
@@ -258,31 +262,65 @@ def screen_both_clips(
             for _ in range(runs_per_clip)
         ]
 
-        for i, fut in enumerate(front_futs):
+        for fut in front_futs:
             try:
-                res = fut.result()
-                front_runs[i] = res.get("reps", [])
+                reps = fut.result().get("reps", [])
+                if reps:
+                    front_runs.append(reps)
             except Exception:
-                front_runs[i] = []
+                pass
 
-        for i, fut in enumerate(side_futs):
+        for fut in side_futs:
             try:
-                res = fut.result()
-                side_runs[i] = res.get("reps", [])
+                reps = fut.result().get("reps", [])
+                if reps:
+                    side_runs.append(reps)
             except Exception:
-                side_runs[i] = []
+                pass
 
-    if not any(front_runs):
+    retry_front_count = (runs_per_clip - len(front_runs)) if len(front_runs) < 3 else 0
+    retry_side_count = (runs_per_clip - len(side_runs)) if len(side_runs) < 3 else 0
+
+    if retry_front_count > 0 or retry_side_count > 0:
+        with ThreadPoolExecutor(max_workers=retry_front_count + retry_side_count) as pool:
+            retry_front_futs = [
+                pool.submit(call_flash_once, front_norm_bytes, "front", timeout_seconds)
+                for _ in range(retry_front_count)
+            ]
+            retry_side_futs = [
+                pool.submit(call_flash_once, side_norm_bytes, "side", timeout_seconds)
+                for _ in range(retry_side_count)
+            ]
+            for fut in retry_front_futs:
+                try:
+                    reps = fut.result().get("reps", [])
+                    if reps:
+                        front_runs.append(reps)
+                except Exception:
+                    pass
+            for fut in retry_side_futs:
+                try:
+                    reps = fut.result().get("reps", [])
+                    if reps:
+                        side_runs.append(reps)
+                except Exception:
+                    pass
+
+    if not front_runs:
         raise ModelParseError("front")
-    if not any(side_runs):
+    if not side_runs:
         raise ModelParseError("side")
 
     front_aligned = align_reps_across_runs(front_runs, view="front")
     side_aligned = align_reps_across_runs(side_runs, view="side")
 
     return {
-        "front": vote_aligned_reps(front_aligned, view="front", expected_runs=runs_per_clip),
-        "side": vote_aligned_reps(side_aligned, view="side", expected_runs=runs_per_clip),
+        "front": vote_aligned_reps(
+            front_aligned, view="front", expected_runs=len(front_runs)
+        ),
+        "side": vote_aligned_reps(
+            side_aligned, view="side", expected_runs=len(side_runs)
+        ),
     }
 
 
@@ -382,7 +420,7 @@ def recheck_disputed_reps_progressive(
 
     def _make_progress_payload() -> Dict[str, Any]:
         running_labels = [
-            f"rep {future_to_task[f][1]['rep']}"
+            f"{future_to_task[f][0]} rep {future_to_task[f][1]['rep']}"
             for f in future_to_task
             if f in pending_futs
         ]
@@ -404,7 +442,7 @@ def recheck_disputed_reps_progressive(
                 raw_json = None
 
             apply_argon_result(rep_entry, raw_json)
-            done_labels.append(f"rep {rep_num} done")
+            done_labels.append(f"{view} rep {rep_num} done")
             yield _make_progress_payload()
     except FuturesTimeoutError:
         pass
@@ -414,8 +452,8 @@ def recheck_disputed_reps_progressive(
     if pending_futs:
         for fut in list(pending_futs):
             pending_futs.discard(fut)
-            _, rep_entry = future_to_task[fut]
+            view, rep_entry = future_to_task[fut]
             rep_num = rep_entry["rep"]
             apply_argon_result(rep_entry, None)
-            done_labels.append(f"rep {rep_num} done")
+            done_labels.append(f"{view} rep {rep_num} done")
         yield _make_progress_payload()

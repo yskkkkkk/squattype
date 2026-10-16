@@ -65,7 +65,7 @@ def build_recheck_prompt(view: str, disputed_axes: Sequence[str]) -> str:
 def normalize_korean_value(axis: str, raw_value: Optional[str]) -> Optional[str]:
     """Convert a Korean model judgment string into a single-letter code.
 
-    Reads only the text before any '(' and strip spaces.
+    Reads only the text before any '(' and strips spaces.
     Returns None for '판단 불가' or unrecognized values.
     """
     if not raw_value or not isinstance(raw_value, str):
@@ -100,11 +100,12 @@ def align_reps_across_runs(
     view: str,
     max_offset_seconds: float = 0.7,
 ) -> List[Dict[str, Any]]:
-    """Align reps across multiple Flash runs for a single view.
+    """Align reps across successful Flash runs for a single view.
 
-    - Takes the most common rep count across non-empty runs.
+    - Drops any empty/failed runs.
+    - Takes the most common rep count across successful runs.
     - Uses the first run with that count as the anchor.
-    - Matches each other run's reps to the anchor by nearest bottom within 0.7 s.
+    - Matches each successful run's reps to the anchor by nearest bottom within 0.7 s.
     """
     normalized_runs: List[List[Dict[str, Any]]] = [
         [normalize_rep_dict(r, view) for r in run]
@@ -119,7 +120,7 @@ def align_reps_across_runs(
     anchor_run = next(run for run in normalized_runs if len(run) == mode_count)
 
     aligned: List[Dict[str, Any]] = []
-    num_total_runs = len(runs)
+    num_successful = len(normalized_runs)
 
     for idx, anchor_rep in enumerate(anchor_run, start=1):
         anchor_bottom = float(anchor_rep["bottom"])
@@ -127,13 +128,7 @@ def align_reps_across_runs(
             axis: [] for axis in VIEW_AXES[view]
         }
 
-        for run in runs:
-            if not run:
-                for axis in VIEW_AXES[view]:
-                    votes_by_axis[axis].append(None)
-                continue
-
-            norm_run = [normalize_rep_dict(r, view) for r in run]
+        for norm_run in normalized_runs:
             nearest = min(
                 norm_run,
                 key=lambda r: abs(float(r["bottom"]) - anchor_bottom),
@@ -145,14 +140,11 @@ def align_reps_across_runs(
                 for axis in VIEW_AXES[view]:
                     votes_by_axis[axis].append(None)
 
-        for axis in VIEW_AXES[view]:
-            while len(votes_by_axis[axis]) < num_total_runs:
-                votes_by_axis[axis].append(None)
-
         aligned.append(
             {
                 "rep": idx,
                 "bottom": anchor_bottom,
+                "successful_runs": num_successful,
                 "votes": votes_by_axis,
             }
         )
@@ -175,12 +167,14 @@ def majority_vote(votes: Sequence[Optional[str]], axis: str) -> str:
 def vote_aligned_reps(
     aligned_reps: Sequence[Dict[str, Any]],
     view: str,
-    expected_runs: int = 5,
+    expected_runs: Optional[int] = None,
+    min_successful_runs: int = 3,
 ) -> List[Dict[str, Any]]:
-    """Evaluate 5 votes per (rep, axis) cell.
+    """Evaluate votes per (rep, axis) cell among successful runs.
 
-    All 5 votes equal and present -> Confirmed.
-    Otherwise -> marked for Argon verification with majority fallback value.
+    Unanimous among successful runs (with no missing aligned reps) -> Confirmed,
+    provided at least `min_successful_runs` (3) runs succeeded.
+    If fewer than 3 runs succeeded, or votes split / rep missing -> disputed.
     """
     axes = VIEW_AXES[view]
     results: List[Dict[str, Any]] = []
@@ -188,6 +182,12 @@ def vote_aligned_reps(
     for item in aligned_reps:
         cells: Dict[str, Dict[str, Any]] = {}
         disputed_axes: List[str] = []
+        first_axis_votes = next(iter(item["votes"].values()), [])
+        target_runs = (
+            expected_runs
+            if expected_runs is not None
+            else int(item.get("successful_runs", len(first_axis_votes)))
+        )
 
         for axis in axes:
             votes: List[Optional[str]] = list(item["votes"].get(axis, []))
@@ -195,13 +195,14 @@ def vote_aligned_reps(
             problem_code = AXIS_CODES[axis]["problem"]
             valid_votes = [v for v in votes if v in (good_code, problem_code)]
 
-            all_equal = (
-                len(valid_votes) == expected_runs
+            unanimous = (
+                target_runs >= min_successful_runs
+                and len(valid_votes) == target_runs
                 and len(set(valid_votes)) == 1
             )
             maj = majority_vote(votes, axis)
 
-            if all_equal:
+            if unanimous:
                 cells[axis] = {
                     "value": valid_votes[0],
                     "majority_value": maj,

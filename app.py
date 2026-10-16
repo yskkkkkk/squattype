@@ -209,7 +209,10 @@ if analyze_clicked and both_uploaded:
             )
 
         disputed_reps = [
-            r for v in ("front", "side") for r in screened[v] if r.get("disputed_axes")
+            (v, r)
+            for v in ("front", "side")
+            for r in screened[v]
+            if r.get("disputed_axes")
         ]
         if disputed_reps:
             total_disputed = len(disputed_reps)
@@ -222,7 +225,7 @@ if analyze_clicked and both_uploaded:
                 format_argon_progress_line(
                     total_disputed,
                     [],
-                    [f"rep {r['rep']}" for r in disputed_reps],
+                    [f"{v} rep {r['rep']}" for v, r in disputed_reps],
                 )
             )
             t2 = time.monotonic()
