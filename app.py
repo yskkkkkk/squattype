@@ -528,11 +528,12 @@ if (analyze_clicked or st.session_state.pop("retry_requested", False)) and both_
         st.warning(CONTENT["messages"]["too_long"])
     except ModelParseError as err:
         st.warning(f"Couldn't read the result for the {err.view} clip. Try again.")
-        if st.button("Try again"):
-            st.session_state["retry_requested"] = True
-            st.rerun()
+        st.button(
+            "Try again",
+            on_click=lambda: st.session_state.update(retry_requested=True),
+        )
     except Exception:
-        st.warning("Couldn't read this clip. Try a different file.")
+        st.warning("Something went wrong with this clip. Try again or use a different file.")
 
 elif "screened" in st.session_state:
     screened_data = st.session_state["screened"]
